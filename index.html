@@ -2,11 +2,11 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>固定号码通话</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; background: #111; color: #eee;
+  html, body { margin: 0; background: #111; color: #eee; touch-action: manipulation;
     font: 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
   #app { min-height: 100vh; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   #stage { position: relative; height: 32vh; background: #000; }
@@ -22,7 +22,7 @@
   .t { font-size: 14px; color: #bbb; }
   input[type=text] { flex: 1; min-width: 0; padding: 12px; font-size: 20px; text-align: center; letter-spacing: 1px;
     border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
-  button { flex: 1; padding: 13px 8px; font-size: 17px; border: 0; border-radius: 10px; color: #fff; background: #0a84ff; cursor: pointer; }
+  button { flex: 1; padding: 13px 8px; font-size: 17px; border: 0; border-radius: 10px; color: #fff; background: #0a84ff; cursor: pointer; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
   button.green { background: #30d158; }
   button.red { background: #ff453a; }
   button.gray { background: #3a3a3c; }
