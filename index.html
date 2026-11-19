@@ -9,6 +9,9 @@
   html, body { margin: 0; background: #111; color: #eee; touch-action: manipulation;
     font: 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
   #app { min-height: 100vh; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  #app.sip-centered { display: flex; flex-direction: column; justify-content: center; align-items: center; }
+  #app.sip-centered #status, #app.sip-centered #panel { width: 100%; max-width: 440px; }
+  #app.sip-centered #status { border-radius: 10px 10px 0 0; }
   #stage { position: relative; height: 32vh; background: #000; }
   #remote { width: 100%; height: 100%; object-fit: cover; background: #000; }
   #local { position: absolute; right: 10px; top: 10px; width: 72px; height: 96px; object-fit: cover;
@@ -580,6 +583,8 @@ function render() {
   const p2p = appMode === 'p2p';
   $('btnModeP2P').className = p2p ? '' : 'gray';
   $('btnModeSip').className = p2p ? 'gray' : '';
+  $('stage').hidden = !p2p && !sipSession;
+  $('app').classList.toggle('sip-centered', !p2p && sipRegistered && !busy);
   $('modeRow').hidden = busy;
   $('badge').textContent = online ? '● 在线' : '○ 离线';
   $('badge').className = online ? 'on' : '';
