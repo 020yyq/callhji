@@ -31,17 +31,24 @@
   #incoming { background: #1f2a44; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
   #inText { font-size: 20px; text-align: center; }
 
-  /* 聊天区域样式 */
+  /* 聊天与图片区域样式 */
   #chatSec { background: #18181a; border: 1px solid #2c2c2e; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
   #chatHeader { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #aaa; }
   #btnClearChat { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; border-radius: 6px; background: #2c2c2e; color: #bbb; }
-  #chatBox { height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px; background: #111; border-radius: 8px; }
+  #chatBox { height: 210px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 6px; background: #111; border-radius: 8px; }
   .msg { max-width: 82%; padding: 8px 12px; border-radius: 12px; font-size: 15px; line-height: 1.4; word-break: break-word; }
   .msg.me { align-self: flex-end; background: #0a84ff; color: #fff; border-bottom-right-radius: 4px; }
   .msg.peer { align-self: flex-start; background: #2c2c2e; color: #eee; border-bottom-left-radius: 4px; }
-  .msg-meta { font-size: 11px; opacity: 0.75; margin-bottom: 2px; }
+  .msg-meta { font-size: 11px; opacity: 0.75; margin-bottom: 3px; }
+  .msg-img { display: block; max-width: 220px; max-height: 220px; width: auto; height: auto; border-radius: 8px; margin-top: 4px; cursor: pointer; }
+  #btnImg { flex: 0 0 auto; padding: 10px 12px; font-size: 15px; background: #3a3a3c; }
   #chatInput { flex: 1; min-width: 0; padding: 10px 12px; font-size: 16px; text-align: left; letter-spacing: 0; border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
   #btnSend { flex: 0 0 76px; padding: 10px 8px; font-size: 16px; }
+
+  /* 图片灯箱预览 */
+  #imgModal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.9); z-index: 999;
+    display: flex; align-items: center; justify-content: center; padding: 16px; }
+  #imgModal img { max-width: 100%; max-height: 88vh; border-radius: 8px; object-fit: contain; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -87,14 +94,16 @@
       <button id="btnHang" class="red">挂断</button>
     </div>
 
-    <!-- 文字消息区域：上线后随时可发，通话中也可用 -->
+    <!-- 文字与图片消息区域：上线后随时可发，通话中也可用 -->
     <div id="chatSec" hidden>
       <div id="chatHeader">
-        <span id="chatTitle">文字消息（直连传输，不经过服务器存储）</span>
+        <span id="chatTitle">消息（直连传输，图片自动压缩适配）</span>
         <button id="btnClearChat" type="button">清空</button>
       </div>
       <div id="chatBox"></div>
       <div class="row">
+        <input id="imgPicker" type="file" accept="image/*" hidden>
+        <button id="btnImg" type="button">图片</button>
         <input id="chatInput" type="text" maxlength="1000" placeholder="输入消息发给对方…">
         <button id="btnSend" type="button">发送</button>
       </div>
@@ -102,10 +111,18 @@
   </div>
 </div>
 
+<!-- 点击消息里的图片放大查看 -->
+<div id="imgModal" hidden>
+  <img id="imgModalSrc" alt="图片预览">
+</div>
+
 <script>
 // ===== 配置 =====
 const METERED_APP = 'yangyyg'; // 对应 yangyyg.metered.live
 const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
+const MAX_IMG_RAW_BYTES = 15 * 1024 * 1024; // 限制单张原始图片最大 15MB
+const MAX_IMG_SIDE = 1280;                  // 压缩后最长边不超过 1280px
+const IMG_JPEG_QUALITY = 0.78;              // 压缩质量
 
 const RTC_CONFIG = {
   iceServers: [
@@ -137,7 +154,7 @@ async function loadTurnCredentials() {
   }
 }
 
-const PREFIX = 'wrtc-';                 // 号码在公共服务器上的前缀，减少与别人撞号
+const PREFIX = 'wrtc-';
 const PEERJS_URLS = [
   'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js',
   'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js',
@@ -150,11 +167,11 @@ if (q.get('host')) {
   PEER_OPTS.path = q.get('path') || '/';
   PEER_OPTS.secure = q.get('secure') !== '0';
 }
-const RING_MS = Number(q.get('ring')) || 40000;   // 呼叫/来电最长等待时间
+const RING_MS = Number(q.get('ring')) || 40000;
 
 const $ = (id) => document.getElementById(id);
 let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
-let chatConns = {}; // 缓存已建立的聊天 DataConnection，key 为完整 peerId
+let chatConns = {};
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
@@ -233,14 +250,25 @@ function cleanupCall(msg, isError = false) {
   }
 }
 
-// ===== 文字消息渲染与收发 =====
+// ===== 文字与图片消息渲染、压缩与收发 =====
 function nowTimeStr() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function appendChatMessage(senderLabel, text, isMe) {
+function openImagePreview(src) {
+  if (!src) return;
+  $('imgModalSrc').src = src;
+  $('imgModal').hidden = false;
+}
+
+function closeImagePreview() {
+  $('imgModal').hidden = true;
+  $('imgModalSrc').src = '';
+}
+
+function appendChatMessage(senderLabel, payload, isMe) {
   const box = $('chatBox');
   const item = document.createElement('div');
   item.className = 'msg ' + (isMe ? 'me' : 'peer');
@@ -248,14 +276,71 @@ function appendChatMessage(senderLabel, text, isMe) {
   const meta = document.createElement('div');
   meta.className = 'msg-meta';
   meta.textContent = `${senderLabel} · ${nowTimeStr()}`;
-
-  const body = document.createElement('div');
-  body.textContent = text;
-
   item.appendChild(meta);
-  item.appendChild(body);
+
+  if (payload && payload.kind === 'image' && typeof payload.dataUrl === 'string') {
+    const img = document.createElement('img');
+    img.className = 'msg-img';
+    img.src = payload.dataUrl;
+    img.alt = payload.name || '图片消息';
+    img.onclick = () => openImagePreview(payload.dataUrl);
+    item.appendChild(img);
+  } else if (payload && typeof payload.text === 'string') {
+    const body = document.createElement('div');
+    body.textContent = payload.text;
+    item.appendChild(body);
+  }
+
   box.appendChild(item);
   box.scrollTop = box.scrollHeight;
+}
+
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) {
+      return reject(new Error('请选择图片文件'));
+    }
+    if (file.size > MAX_IMG_RAW_BYTES) {
+      return reject(new Error('图片太大（超过 15MB）'));
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > MAX_IMG_SIDE || height > MAX_IMG_SIDE) {
+          if (width >= height) {
+            height = Math.round((height * MAX_IMG_SIDE) / width);
+            width = MAX_IMG_SIDE;
+          } else {
+            width = Math.round((width * MAX_IMG_SIDE) / height);
+            height = MAX_IMG_SIDE;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        const dataUrl = mime === 'image/png'
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', IMG_JPEG_QUALITY);
+
+        resolve({
+          kind: 'image',
+          name: file.name || 'image',
+          dataUrl,
+        });
+      };
+      img.onerror = () => reject(new Error('图片解析失败'));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error('读取图片文件失败'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function bindDataConnection(conn) {
@@ -266,14 +351,23 @@ function bindDataConnection(conn) {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'chat' && typeof data.text === 'string') {
       const fromCode = String(conn.peer).replace(PREFIX, '');
-      // 收到消息时，如果当前没在通话且对方号码框为空，自动填入方便直接回复
       if (!call && !incoming && !$('peerCode').value.trim()) {
         $('peerCode').value = fromCode;
         store.set('peerCode', fromCode);
       }
-      appendChatMessage(fromCode, data.text, false);
+      appendChatMessage(fromCode, { kind: 'text', text: data.text }, false);
       if (!call && !incoming) {
         setStatus(`收到来自 ${fromCode} 的新消息`);
+      }
+    } else if (data.type === 'image' && typeof data.dataUrl === 'string' && data.dataUrl.startsWith('data:image/')) {
+      const fromCode = String(conn.peer).replace(PREFIX, '');
+      if (!call && !incoming && !$('peerCode').value.trim()) {
+        $('peerCode').value = fromCode;
+        store.set('peerCode', fromCode);
+      }
+      appendChatMessage(fromCode, { kind: 'image', dataUrl: data.dataUrl, name: data.name || '图片' }, false);
+      if (!call && !incoming) {
+        setStatus(`收到来自 ${fromCode} 的图片`);
       }
     } else if (data.type === 'reject' && call && call.peer === conn.peer) {
       cleanupCall('对方已拒绝来电');
@@ -308,6 +402,37 @@ function getActiveTargetCode() {
   return $('peerCode').value.trim();
 }
 
+function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
+  const existing = chatConns[fullTarget];
+  if (existing && existing.open) {
+    try {
+      existing.send(payload);
+      appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+      return;
+    } catch (e) {
+      delete chatConns[fullTarget];
+    }
+  }
+
+  try {
+    const conn = peer.connect(fullTarget, { reliable: true });
+    bindDataConnection(conn);
+    conn.on('open', () => {
+      try {
+        conn.send(payload);
+        appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+      } catch (e) {
+        setStatus('发送失败，请重试');
+      }
+    });
+    conn.on('error', () => {
+      setStatus('无法连接到对方，对方可能不在线');
+    });
+  } catch (e) {
+    setStatus('发送失败：' + (e.message || e));
+  }
+}
+
 function sendChatMessage() {
   if (!peer || !online) return setStatus('请先上线后再发送消息');
   const text = $('chatInput').value.trim();
@@ -320,37 +445,34 @@ function sendChatMessage() {
 
   store.set('peerCode', targetCode);
   $('chatInput').value = '';
+  dispatchPayload(targetCode, fullTarget, { type: 'chat', text }, { kind: 'text', text });
+}
 
-  const payload = { type: 'chat', text };
-  const existing = chatConns[fullTarget];
-
-  if (existing && existing.open) {
-    try {
-      existing.send(payload);
-      appendChatMessage('我 -> ' + targetCode, text, true);
-      return;
-    } catch (e) {
-      delete chatConns[fullTarget];
-    }
+async function handleImageSelected(file) {
+  if (!file) return;
+  if (!peer || !online) {
+    setStatus('请先上线后再发送图片');
+    return;
+  }
+  const targetCode = getActiveTargetCode();
+  if (!validCode(targetCode)) {
+    setStatus('请先填写对方的号码（3～20 位字母或数字）');
+    return;
+  }
+  const fullTarget = PREFIX + targetCode;
+  if (fullTarget === peer.id) {
+    setStatus('不能给自己发图片');
+    return;
   }
 
-  // 尚未建立连接或已断开时，重新建立连接并发送
+  store.set('peerCode', targetCode);
+  setStatus('正在处理图片…');
   try {
-    const conn = peer.connect(fullTarget, { reliable: true });
-    bindDataConnection(conn);
-    conn.on('open', () => {
-      try {
-        conn.send(payload);
-        appendChatMessage('我 -> ' + targetCode, text, true);
-      } catch (e) {
-        setStatus('消息发送失败，请重试');
-      }
-    });
-    conn.on('error', () => {
-      setStatus('无法连接到对方，对方可能不在线');
-    });
-  } catch (e) {
-    setStatus('发送失败：' + (e.message || e));
+    const compressed = await compressImageFile(file);
+    const payload = { type: 'image', name: compressed.name, dataUrl: compressed.dataUrl };
+    dispatchPayload(targetCode, fullTarget, payload, compressed);
+  } catch (err) {
+    setStatus(err.message || '图片发送失败');
   }
 }
 
@@ -369,7 +491,7 @@ function goOnline() {
   p.on('open', () => {
     if (peer !== p) return;
     online = true; render();
-    setStatus('已上线，号码 ' + code + '。可以拨打、发消息，或等对方来电');
+    setStatus('已上线，号码 ' + code + '。可以拨打、发消息/图片，或等对方来电');
   });
   p.on('call', onIncoming);
   p.on('connection', (conn) => {
@@ -599,6 +721,12 @@ $('btnAccept').onclick = accept;
 $('btnReject').onclick = reject;
 $('btnHang').onclick = () => hangup();
 $('btnSend').onclick = sendChatMessage;
+$('btnImg').onclick = () => { $('imgPicker').value = ''; $('imgPicker').click(); };
+$('imgPicker').onchange = (e) => {
+  const f = e.target && e.target.files && e.target.files[0];
+  handleImageSelected(f);
+};
+$('imgModal').onclick = closeImagePreview;
 $('chatInput').onkeydown = (e) => {
   if (e.key === 'Enter' && !e.isComposing) {
     e.preventDefault();
