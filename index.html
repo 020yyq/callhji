@@ -133,7 +133,7 @@ if (q.get('host')) {
 const RING_MS = Number(q.get('ring')) || 40000;   // 呼叫/来电最长等待时间
 
 const $ = (id) => document.getElementById(id);
-let peer = null, online = false, call = null, incoming = null;
+let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let PeerCtor = null;
 
@@ -153,6 +153,31 @@ function render() {
   $('ctrl').hidden = !call;
 }
 
+function clearCallTimers() {
+  if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
+  if (inTimer) { clearTimeout(inTimer); inTimer = null; }
+}
+
+function closeCtrlConn() {
+  if (ctrlConn) {
+    try { ctrlConn.close(); } catch (e) {}
+    ctrlConn = null;
+  }
+}
+
+function cleanupCall(msg, isError = false) {
+  clearCallTimers();
+  const c = call;
+  call = null;
+  if (c) {
+    try { c.close(); } catch (e) {}
+  }
+  closeCtrlConn();
+  stopMedia();
+  render();
+  if (msg) setStatus(isError ? '出错：' + msg : msg);
+}
+
 // ===== 上线（注册固定号码）=====
 function goOnline() {
   const code = $('myCode').value.trim();
@@ -164,8 +189,30 @@ function goOnline() {
   setStatus('正在上线…');
   const p = new PeerCtor(PREFIX + code, PEER_OPTS);
   peer = p;
-  p.on('open', () => { if (peer !== p) return; online = true; render(); setStatus('已上线，号码 ' + code + '。可以拨打，也可以等对方来电（请保持本页面打开）'); });
+  p.on('open', () => {
+    if (peer !== p) return;
+    online = true; render();
+    setStatus('已上线，号码 ' + code + '。可以拨打，也可以等对方来电（请保持本页面打开）');
+  });
   p.on('call', onIncoming);
+  p.on('connection', (conn) => {
+    if (peer !== p) return;
+    conn.on('data', (data) => {
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'reject' && call && call.peer === conn.peer) {
+        cleanupCall('对方已拒绝来电');
+      } else if (data.type === 'busy' && call && call.peer === conn.peer) {
+        cleanupCall('对方正在通话中');
+      } else if (data.type === 'cancel' && incoming && incoming.peer === conn.peer) {
+        clearCallTimers();
+        const inc = incoming;
+        incoming = null;
+        try { inc.close(); } catch (e) {}
+        render();
+        setStatus('对方已取消呼叫');
+      }
+    });
+  });
   p.on('disconnected', () => {
     if (peer !== p) return;
     online = false; render(); setStatus('与服务器断开，重连中…');
@@ -177,7 +224,7 @@ function goOnline() {
 function onPeerError(err) {
   const t = err && err.type;
   if (t === 'peer-unavailable') {
-    if (call && !call.open) hangup('对方不在线（对方需要先打开本页面并上线）');
+    if (call && !$('remote').srcObject) cleanupCall('对方不在线（对方需要先打开本页面并上线）');
     else setStatus('对方不在线');
     return;
   }
@@ -218,18 +265,56 @@ function stopMedia() {
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
+function sendSignal(targetPeerId, payload) {
+  if (!targetPeerId || !peer || peer.destroyed) return;
+  try {
+    const conn = peer.connect(targetPeerId, { reliable: true });
+    conn.on('open', () => {
+      try { conn.send(payload); } catch (e) {}
+      setTimeout(() => { try { conn.close(); } catch (e) {} }, 400);
+    });
+    conn.on('error', () => {});
+  } catch (e) {}
+}
+
 // ===== 通话 =====
 function attachCall(c) {
+  let connected = false;
+
   c.on('stream', (rs) => {
     if (call !== c) return;
-    clearTimeout(ringTimer);
+    connected = true;
+    clearCallTimers();
     const v = $('remote');
     if (v.srcObject !== rs) v.srcObject = rs;
     v.play().catch(() => { $('tap').hidden = false; }); // 被系统拦截时，让用户点一下
     setStatus('通话中（请保持本页面在前台）');
   });
-  c.on('close', () => { if (call === c) hangup('通话已结束'); });
-  c.on('error', (e) => { if (call === c) hangup('通话出错：' + ((e && e.type) || e)); });
+
+  c.on('close', () => {
+    if (call !== c) return;
+    cleanupCall(connected ? '通话已结束' : '对方已结束或拒绝了来电');
+  });
+
+  c.on('error', (e) => {
+    if (call !== c) return;
+    cleanupCall((e && e.type) || String(e), true);
+  });
+
+  // 底层 RTCPeerConnection 状态监听兜底，防止未接通前拒接时 close 事件延迟或丢失
+  const pc = c.peerConnection;
+  if (pc) {
+    const onPcStateChange = () => {
+      if (call !== c) return;
+      const st = pc.connectionState;
+      const ice = pc.iceConnectionState;
+      if (st === 'closed' || st === 'failed' || ice === 'failed') {
+        cleanupCall(connected ? '通话已断开' : '对方已拒绝来电或连接中断');
+      }
+    };
+    pc.addEventListener('connectionstatechange', onPcStateChange);
+    pc.addEventListener('iceconnectionstatechange', onPcStateChange);
+  }
 }
 
 async function dial(video) {
@@ -239,25 +324,76 @@ async function dial(video) {
   if (!validCode(target)) return setStatus('请输入对方的号码（3～20 位字母或数字）');
   if (PREFIX + target === peer.id) return setStatus('不能拨打自己');
   if (!(await getMedia(video))) return;
+
   store.set('peerCode', target);
-  const c = peer.call(PREFIX + target, localStream, { metadata: { video: localStream.getVideoTracks().length > 0 } });
+  const fullTarget = PREFIX + target;
+
+  // 预建控制通道，接收对方拒接/忙线等即时通知
+  closeCtrlConn();
+  try {
+    const conn = peer.connect(fullTarget, { reliable: true });
+    ctrlConn = conn;
+    conn.on('data', (data) => {
+      if (!data || typeof data !== 'object' || !call) return;
+      if (data.type === 'reject') cleanupCall('对方已拒绝来电');
+      else if (data.type === 'busy') cleanupCall('对方正在通话中');
+    });
+    conn.on('error', () => {});
+  } catch (e) {}
+
+  const c = peer.call(fullTarget, localStream, {
+    metadata: { video: localStream.getVideoTracks().length > 0 }
+  });
   call = c;
   attachCall(c);
   render();
   setStatus('正在呼叫 ' + target + '…（对方需要在线并接听）');
-  ringTimer = setTimeout(() => { if (call === c && !c.open) hangup('对方无应答'); }, RING_MS);
+  ringTimer = setTimeout(() => {
+    if (call === c && !$('remote').srcObject) {
+      sendSignal(fullTarget, { type: 'cancel' });
+      cleanupCall('对方无应答');
+    }
+  }, RING_MS);
 }
 
 function onIncoming(c) {
-  if (call || incoming) { try { c.close(); } catch (e) {} return; } // 忙线
+  if (call || incoming) {
+    sendSignal(c.peer, { type: 'busy' });
+    try { c.close(); } catch (e) {}
+    return;
+  } // 忙线
   incoming = c;
   const from = String(c.peer).replace(PREFIX, '');
   const video = !!(c.metadata && c.metadata.video);
   $('inText').textContent = '来电：' + from + (video ? '（视频）' : '（语音）');
   setStatus('有来电');
   render();
+
+  // 如果主叫在接听前主动取消，监听底层连接断开及时收起来电弹窗
+  const pc = c.peerConnection;
+  if (pc) {
+    const onInPcChange = () => {
+      if (incoming !== c) return;
+      if (pc.connectionState === 'closed' || pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') {
+        clearCallTimers();
+        incoming = null;
+        render();
+        setStatus('对方已取消呼叫');
+      }
+    };
+    pc.addEventListener('connectionstatechange', onInPcChange);
+    pc.addEventListener('iceconnectionstatechange', onInPcChange);
+  }
+
   clearTimeout(inTimer);
-  inTimer = setTimeout(() => { if (incoming === c) { incoming = null; try { c.close(); } catch (e) {} render(); setStatus('来电已过期'); } }, RING_MS);
+  inTimer = setTimeout(() => {
+    if (incoming === c) {
+      incoming = null;
+      try { c.close(); } catch (e) {}
+      render();
+      setStatus('来电已过期');
+    }
+  }, RING_MS);
 }
 
 async function accept() {
@@ -278,18 +414,20 @@ function reject() {
   clearTimeout(inTimer);
   const c = incoming;
   incoming = null;
-  if (c) { try { c.close(); } catch (e) {} }
+  if (c) {
+    sendSignal(c.peer, { type: 'reject' });
+    try { c.close(); } catch (e) {}
+  }
   stopMedia(); render();
   setStatus('已拒绝来电');
 }
 
 function hangup(msg) {
-  clearTimeout(ringTimer);
   const c = call;
-  call = null;
-  if (c) { try { c.close(); } catch (e) {} }
-  stopMedia(); render();
-  setStatus(msg || '已挂断');
+  if (c && !$('remote').srcObject && c.peer) {
+    sendSignal(c.peer, { type: 'cancel' });
+  }
+  cleanupCall(msg || '已挂断', false);
 }
 
 // ===== 按钮 =====
