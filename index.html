@@ -121,8 +121,8 @@
 const METERED_APP = 'yangyyg'; // 对应 yangyyg.metered.live
 const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
 const MAX_IMG_RAW_BYTES = 15 * 1024 * 1024; // 限制单张原始图片最大 15MB
-const MAX_IMG_SIDE = 1280;                  // 压缩后最长边不超过 1280px
-const IMG_JPEG_QUALITY = 0.78;              // 压缩质量
+const MAX_IMG_SIDE = 800;                    // 压缩后最长边不超过 800px，降低 DataChannel 传输失败概率
+const IMG_JPEG_QUALITY = 0.62;               // 压缩质量
 
 const RTC_CONFIG = {
   iceServers: [
@@ -324,14 +324,11 @@ function compressImageFile(file) {
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-        const dataUrl = mime === 'image/png'
-          ? canvas.toDataURL('image/png')
-          : canvas.toDataURL('image/jpeg', IMG_JPEG_QUALITY);
+        const dataUrl = canvas.toDataURL('image/jpeg', IMG_JPEG_QUALITY);
 
         resolve({
           kind: 'image',
-          name: file.name || 'image',
+          name: file.name || 'image.jpg',
           dataUrl,
         });
       };
@@ -408,6 +405,7 @@ function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
     try {
       existing.send(payload);
       appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+      if (payload.type === 'image') setStatus('图片已发送给 ' + targetCode);
       return;
     } catch (e) {
       delete chatConns[fullTarget];
@@ -418,12 +416,15 @@ function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
     const conn = peer.connect(fullTarget, { reliable: true });
     bindDataConnection(conn);
     conn.on('open', () => {
-      try {
-        conn.send(payload);
-        appendChatMessage('我 -> ' + targetCode, uiPayload, true);
-      } catch (e) {
-        setStatus('发送失败，请重试');
-      }
+      setTimeout(() => {
+        try {
+          conn.send(payload);
+          appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+          if (payload.type === 'image') setStatus('图片已发送给 ' + targetCode);
+        } catch (e) {
+          setStatus('发送失败，请重试');
+        }
+      }, 150);
     });
     conn.on('error', () => {
       setStatus('无法连接到对方，对方可能不在线');
