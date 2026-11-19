@@ -66,6 +66,23 @@
   #imgModal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.9); z-index: 999;
     display: flex; align-items: center; justify-content: center; padding: 16px; }
   #imgModal img { max-width: 100%; max-height: 88vh; border-radius: 8px; object-fit: contain; }
+
+  /* 本地注册登录栏与弹窗 */
+  #authBar { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: 10px; background: #1c1c1e; border: 1px solid #2c2c2e; font-size: 13px; }
+  #authUserText { color: #ddd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auth-mini-btn { flex: 0 0 auto; padding: 6px 12px; font-size: 13px; border-radius: 8px; }
+  #authModal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.82); z-index: 1000;
+    display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .auth-card { width: 100%; max-width: 380px; background: #1c1c1e; border: 1px solid #333;
+    border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .auth-tabs { display: flex; gap: 8px; }
+  .auth-tabs button { padding: 9px; font-size: 15px; border-radius: 8px; }
+  .auth-input { width: 100%; padding: 12px; font-size: 16px; border-radius: 10px;
+    border: 1px solid #444; background: #222; color: #fff; }
+  .auth-tip { font-size: 12px; color: #999; line-height: 1.4; }
+  .auth-err { font-size: 13px; color: #ff453a; min-height: 18px; }
+
   /* SIP 模式 */
   input[type=text].field, input[type=password].field { flex: 1; min-width: 0; padding: 12px; font-size: 16px; text-align: left; letter-spacing: 0;
     border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
@@ -97,6 +114,15 @@
   <div id="status">正在加载…</div>
 
   <div id="panel">
+    <!-- 本地账号栏 -->
+    <div id="authBar">
+      <span id="authUserText">未登录（本机模式）</span>
+      <div style="display:flex; gap:6px;">
+        <button id="btnOpenAuth" class="auth-mini-btn" type="button">登录 / 注册</button>
+        <button id="btnLogout" class="auth-mini-btn gray" type="button" hidden>退出</button>
+      </div>
+    </div>
+
     <!-- 模式切换：号码通话（点对点，PeerJS）/ SIP 通话（SIP over WebSocket，JsSIP）。两种模式同一时间只用一种 -->
     <div id="modeRow" class="row">
       <button id="btnModeP2P" type="button">号码通话</button>
@@ -212,6 +238,27 @@
 <!-- 点击消息里的图片放大查看 -->
 <div id="imgModal" hidden>
   <img id="imgModalSrc" alt="图片预览">
+</div>
+
+<!-- 本地注册登录弹窗 -->
+<div id="authModal" hidden>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authModalTitle">
+    <div id="authModalTitle" style="font-size:18px; font-weight:600; text-align:center;">本地账号登录 / 注册</div>
+    <div class="auth-tabs">
+      <button id="tabLogin" type="button">登录</button>
+      <button id="tabRegister" class="gray" type="button">注册</button>
+    </div>
+    <input id="authAccount" class="auth-input" type="text" maxlength="20"
+      autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="账号（3～20 位字母或数字）">
+    <input id="authPassword" class="auth-input" type="password" maxlength="64"
+      placeholder="密码（至少 6 位）">
+    <div id="authErr" class="auth-err"></div>
+    <div class="row">
+      <button id="btnAuthSubmit" class="green" type="button">登录</button>
+      <button id="btnAuthClose" class="gray" type="button">取消</button>
+    </div>
+    <div class="auth-tip">账号与密码哈希保存在当前浏览器本地，登录后自动绑定并同步固定号码。</div>
+  </div>
 </div>
 
 <script>
@@ -392,7 +439,6 @@ async function postOfflineRecord(targetCode, record) {
       sentAt: nowTimeStr(),
     };
     const bodyStr = 'WRTC1:' + encodeUtf8Base64(wrapped);
-    // 控制单条离线缓存长度，避免过大导致请求失败
     if (bodyStr.length > 650000) return false;
 
     const resp = await fetch(`${OFFLINE_MAILBOX_BASE}/${encodeURIComponent(topic)}`, {
@@ -509,14 +555,12 @@ function recordMissedItem(kind, fromCode, detail, reason, customTime, via) {
 }
 
 function clearMissedItems() {
-  // 只清空当前模式下的提醒
   missedItems = missedItems.filter(x => (x.via || 'p2p') !== appMode);
   saveMissedToStore();
   renderMissed();
 }
 
 function renderMissed() {
-  // 只有上线后才展示未接来电与离线期间的呼叫/信息提醒
   const visibleMissed = missedItems.filter(x => (x.via || 'p2p') === appMode);
   const count = visibleMissed.length;
   const active = appMode === 'sip' ? sipRegistered : online;
@@ -585,6 +629,7 @@ function render() {
   $('btnModeSip').className = p2p ? 'gray' : '';
   $('stage').hidden = !p2p && !sipSession;
   $('app').classList.toggle('sip-centered', !p2p && sipRegistered && !busy);
+  $('authBar').hidden = busy;
   $('modeRow').hidden = busy;
   $('badge').textContent = online ? '● 在线' : '○ 离线';
   $('badge').className = online ? 'on' : '';
@@ -905,6 +950,7 @@ function goOnline() {
   chatConns = {};
   online = false; render();
   store.set('myCode', code);
+  syncCurrentUserCode(code);
   setStatus('正在上线…');
   const p = new PeerCtor(PREFIX + code, PEER_OPTS);
   peer = p;
@@ -1173,8 +1219,6 @@ function hangup(msg) {
 }
 
 // ===== SIP 模式（SIP over WebSocket，使用 JsSIP）=====
-// 说明：浏览器只能通过 WebSocket 连 SIP 服务器，所以服务器必须提供 wss:// 入口，
-// 并支持 WebRTC 媒体（ICE + DTLS-SRTP，例如 Asterisk 的 WebRTC 配置 / FreeSWITCH / Kamailio+rtpengine）。
 const SIP_CAUSE_TEXT = {
   'Busy': '对方正在通话中',
   'Rejected': '对方拒绝了来电',
@@ -1253,7 +1297,6 @@ function renderSip() {
   ['sipWss', 'sipUri', 'sipAuth', 'sipPass'].forEach((id) => { $(id).disabled = working; });
 }
 
-// 对方地址显示：同域只显示分机号，跨域显示 user@host
 function sipRemoteAddr(s) {
   const ri = s && s.remote_identity;
   const uri = ri && ri.uri;
@@ -1263,12 +1306,10 @@ function sipRemoteAddr(s) {
   return (!uri.host || uri.host === sipHost) ? user : user + '@' + uri.host;
 }
 
-// 来电的 SDP 里有没有视频
 function sipOfferHasVideo(s) {
   try { return /^m=video\s+[1-9]/m.test((s.request && s.request.body) || ''); } catch (e) { return false; }
 }
 
-// 输入 1002 / 1002@host / sip:1002@host 都可以
 function buildSipTarget(raw) {
   let t = String(raw || '').trim().replace(/^sips?:/i, '');
   if (!t) return '';
@@ -1406,7 +1447,6 @@ async function sipRegister() {
   ua.start();
 }
 
-// 远端媒体：把收到的音/视频轨道合并进同一个 MediaStream 再给 <video>
 function onSipTrack(s, ev) {
   if (sipSession !== s || !ev || !ev.track) return;
   if (!sipRemoteStream) sipRemoteStream = new MediaStream();
@@ -1423,7 +1463,6 @@ function hookSipPc(s, pc) {
   pc.addEventListener('track', (ev) => onSipTrack(s, ev));
 }
 
-// 兜底：万一 track 事件没赶上，接通后手动把接收器里的轨道补进来
 function syncSipRemote(s) {
   const pc = s && s.connection;
   if (!pc || sipSession !== s) return;
@@ -1457,7 +1496,6 @@ function wireSipSession(s) {
   s.on('failed', (e) => {
     if (sipSession === s) return sipCleanup(sipCauseText(e));
     if (sipIncoming === s) {
-      // 还没接听，对方先挂了
       const from = sipRemoteAddr(s);
       const modeLabel = sipIncomingVideo ? '视频' : '语音';
       clearCallTimers();
@@ -1517,7 +1555,7 @@ async function sipAccept() {
   const s = sipIncoming;
   if (!s) return;
   if (!(await getMedia(sipIncomingVideo))) return sipReject();
-  if (sipIncoming !== s) { stopMedia(); return; } // 等权限弹窗期间对方已挂断
+  if (sipIncoming !== s) { stopMedia(); return; }
   clearCallTimers();
   sipIncoming = null;
   sipSession = s;
@@ -1546,7 +1584,7 @@ function sipReject() {
 function sipHangup(msg) {
   const s = sipSession;
   if (!s) return;
-  sipSession = null; // 先摘掉引用，事件回调里的 sipSession === s 判断就不会重复处理
+  sipSession = null;
   try { s.terminate(); } catch (e) {}
   sipCleanup(msg || '已挂断');
 }
@@ -1558,7 +1596,7 @@ async function sipDial(video) {
   const uri = buildSipTarget(raw);
   if (!uri) return setStatus('请输入对方分机号或 SIP 地址，例如 1002 或 1002@' + (sipHost || 'sip.example.com'));
   if (!(await getMedia(video))) return;
-  if (sipSession || sipIncoming) { stopMedia(); return; } // 等权限弹窗期间来电了
+  if (sipSession || sipIncoming) { stopMedia(); return; }
 
   store.set('sipTarget', raw);
   const hasVideo = !!(localStream && localStream.getVideoTracks().length > 0);
@@ -1576,7 +1614,7 @@ async function sipDial(video) {
     return setStatus('呼叫失败：' + (e.message || e));
   }
   const s0 = sipSession;
-  if (!s0) return; // 同步失败时 failed 回调已经处理完了
+  if (!s0) return;
   ringTimer = setTimeout(() => {
     if (sipSession === s0 && !s0.isEstablished()) sipHangup('对方无应答');
   }, RING_MS);
@@ -1588,7 +1626,6 @@ function setMode(m) {
   appMode = m;
   store.set('mode', m);
   if (m === 'sip') {
-    // 进入 SIP 模式：号码通话下线，释放号码
     const old = peer;
     peer = null;
     chatConns = {};
@@ -1608,6 +1645,165 @@ function setMode(m) {
   }
   render();
 }
+
+// ===== 本地注册登录 =====
+const AUTH_USERS_KEY = 'wrtc_auth_users_v1';
+const AUTH_SESSION_KEY = 'wrtc_auth_session_v1';
+let authTabMode = 'login';
+
+function loadAuthUsers() {
+  const raw = store.get(AUTH_USERS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveAuthUsers(users) {
+  store.set(AUTH_USERS_KEY, JSON.stringify(users));
+}
+
+function getAuthSession() {
+  return store.get(AUTH_SESSION_KEY);
+}
+
+function setAuthSession(acct) {
+  store.set(AUTH_SESSION_KEY, acct || '');
+}
+
+function syncCurrentUserCode(code) {
+  const cur = getAuthSession();
+  if (!cur || !validCode(code)) return;
+  const users = loadAuthUsers();
+  if (!users[cur]) return;
+  users[cur].myCode = code;
+  saveAuthUsers(users);
+}
+
+async function digestPassword(pwd) {
+  if (window.crypto && window.crypto.subtle) {
+    const buf = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(pwd));
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return 'plain:' + pwd;
+}
+
+function renderAuthBar() {
+  const cur = getAuthSession();
+  const users = loadAuthUsers();
+  if (cur && users[cur]) {
+    $('authUserText').textContent = `已登录：${cur}`;
+    $('btnLogout').hidden = false;
+    $('btnOpenAuth').textContent = '切换账号';
+  } else {
+    if (cur) setAuthSession('');
+    $('authUserText').textContent = '未登录（本机模式）';
+    $('btnLogout').hidden = true;
+    $('btnOpenAuth').textContent = '登录 / 注册';
+  }
+}
+
+function setAuthTab(mode) {
+  authTabMode = mode;
+  $('tabLogin').className = mode === 'login' ? '' : 'gray';
+  $('tabRegister').className = mode === 'register' ? '' : 'gray';
+  $('btnAuthSubmit').textContent = mode === 'login' ? '登录' : '注册并登录';
+  $('authErr').textContent = '';
+}
+
+function openAuthModal(mode = 'login') {
+  setAuthTab(mode);
+  $('authAccount').value = getAuthSession() || $('myCode').value.trim();
+  $('authPassword').value = '';
+  $('authModal').hidden = false;
+  setTimeout(() => $('authAccount').focus(), 30);
+}
+
+function closeAuthModal() {
+  $('authModal').hidden = true;
+  $('authErr').textContent = '';
+}
+
+function applyAuthAccount(acct, profile, shouldGoOnline = true) {
+  setAuthSession(acct);
+  const boundCode = (profile && validCode(profile.myCode)) ? profile.myCode : acct;
+  if (validCode(boundCode)) {
+    $('myCode').value = boundCode;
+    store.set('myCode', boundCode);
+    if (shouldGoOnline && appMode === 'p2p' && !call && !incoming && !sipSession && !sipIncoming) {
+      goOnline();
+    }
+  }
+  renderAuthBar();
+  closeAuthModal();
+  setStatus(`已登录账号 ${acct}（号码 ${boundCode}）`);
+}
+
+async function submitAuthForm() {
+  const acct = $('authAccount').value.trim();
+  const pwd = $('authPassword').value;
+  const errEl = $('authErr');
+
+  if (!validCode(acct)) {
+    errEl.textContent = '账号只能是 3～20 位字母或数字';
+    return;
+  }
+  if (!pwd || pwd.length < 6) {
+    errEl.textContent = '密码至少需要 6 位';
+    return;
+  }
+
+  const users = loadAuthUsers();
+  const hash = await digestPassword(pwd);
+
+  if (authTabMode === 'register') {
+    if (users[acct]) {
+      errEl.textContent = '该账号已存在，请直接登录或换一个账号';
+      return;
+    }
+    const curCode = $('myCode').value.trim();
+    const boundCode = validCode(curCode) ? curCode : acct;
+    users[acct] = {
+      passwordHash: hash,
+      myCode: boundCode,
+      createdAt: Date.now(),
+    };
+    saveAuthUsers(users);
+    applyAuthAccount(acct, users[acct], true);
+  } else {
+    const user = users[acct];
+    if (!user || user.passwordHash !== hash) {
+      errEl.textContent = '账号不存在或密码错误';
+      return;
+    }
+    applyAuthAccount(acct, user, true);
+  }
+}
+
+function logoutAuthAccount() {
+  setAuthSession('');
+  renderAuthBar();
+  setStatus('已退出登录（本机号码仍可继续使用）');
+}
+
+$('btnOpenAuth').onclick = () => openAuthModal('login');
+$('btnLogout').onclick = logoutAuthAccount;
+$('tabLogin').onclick = () => setAuthTab('login');
+$('tabRegister').onclick = () => setAuthTab('register');
+$('btnAuthClose').onclick = closeAuthModal;
+$('btnAuthSubmit').onclick = submitAuthForm;
+$('authModal').onclick = (e) => {
+  if (e.target === $('authModal')) closeAuthModal();
+};
+$('authPassword').onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.isComposing) {
+    e.preventDefault();
+    submitAuthForm();
+  }
+};
 
 $('btnModeP2P').onclick = () => setMode('p2p');
 $('btnModeSip').onclick = () => setMode('sip');
@@ -1687,6 +1883,14 @@ function loadScript(src) {
   loadSeenMailboxIds();
   appMode = store.get('mode') === 'sip' ? 'sip' : 'p2p';
   loadSipFields();
+
+  const sessionAcct = getAuthSession();
+  const authUsers = loadAuthUsers();
+  if (sessionAcct && authUsers[sessionAcct] && validCode(authUsers[sessionAcct].myCode)) {
+    store.set('myCode', authUsers[sessionAcct].myCode);
+  }
+  renderAuthBar();
+
   const firstRun = !store.get('myCode');
   if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000)));
   $('myCode').value = store.get('myCode');
