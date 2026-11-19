@@ -135,6 +135,7 @@ const RING_MS = Number(q.get('ring')) || 40000;   // 呼叫/来电最长等待�
 const $ = (id) => document.getElementById(id);
 let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
+let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
 
 const setStatus = (t) => { $('status').textContent = t; };
@@ -143,6 +144,32 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
 };
 const validCode = (c) => /^[A-Za-z0-9]{3,20}$/.test(c);
+
+function formatDuration(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+function startDurationTimer() {
+  stopDurationTimer();
+  callStartTime = Date.now();
+  setStatus('通话中 00:00（请保持本页面在前台）');
+  durationTimer = setInterval(() => {
+    if (!call) return stopDurationTimer();
+    const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+    setStatus(`通话中 ${formatDuration(elapsed)}（请保持本页面在前台）`);
+  }, 1000);
+}
+
+function stopDurationTimer() {
+  if (durationTimer) {
+    clearInterval(durationTimer);
+    durationTimer = null;
+  }
+}
 
 function render() {
   $('badge').textContent = online ? '● 在线' : '○ 离线';
@@ -156,6 +183,7 @@ function render() {
 function clearCallTimers() {
   if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
   if (inTimer) { clearTimeout(inTimer); inTimer = null; }
+  stopDurationTimer();
 }
 
 function closeCtrlConn() {
@@ -166,6 +194,8 @@ function closeCtrlConn() {
 }
 
 function cleanupCall(msg, isError = false) {
+  const finalDuration = callStartTime ? formatDuration(Math.floor((Date.now() - callStartTime) / 1000)) : '';
+  callStartTime = 0;
   clearCallTimers();
   const c = call;
   call = null;
@@ -175,7 +205,10 @@ function cleanupCall(msg, isError = false) {
   closeCtrlConn();
   stopMedia();
   render();
-  if (msg) setStatus(isError ? '出错：' + msg : msg);
+  if (msg) {
+    const suffix = (!isError && finalDuration) ? `（时长 ${finalDuration}）` : '';
+    setStatus(isError ? '出错：' + msg : msg + suffix);
+  }
 }
 
 // ===== 上线（注册固定号码）=====
@@ -283,12 +316,13 @@ function attachCall(c) {
 
   c.on('stream', (rs) => {
     if (call !== c) return;
+    const isFirstStream = !connected;
     connected = true;
-    clearCallTimers();
+    if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
     const v = $('remote');
     if (v.srcObject !== rs) v.srcObject = rs;
     v.play().catch(() => { $('tap').hidden = false; }); // 被系统拦截时，让用户点一下
-    setStatus('通话中（请保持本页面在前台）');
+    if (isFirstStream) startDurationTimer();
   });
 
   c.on('close', () => {
