@@ -9,9 +9,9 @@
   html, body { margin: 0; background: #111; color: #eee;
     font: 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
   #app { min-height: 100vh; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
-  #stage { position: relative; height: 38vh; background: #000; }
+  #stage { position: relative; height: 32vh; background: #000; }
   #remote { width: 100%; height: 100%; object-fit: cover; background: #000; }
-  #local { position: absolute; right: 10px; top: 10px; width: 80px; height: 106px; object-fit: cover;
+  #local { position: absolute; right: 10px; top: 10px; width: 72px; height: 96px; object-fit: cover;
     border-radius: 10px; background: #222; border: 1px solid #444; transform: scaleX(-1); }
   #tap { position: absolute; inset: 0; margin: auto; width: 160px; height: 52px; border: 0;
     border-radius: 26px; background: #0a84ff; color: #fff; font-size: 17px; }
@@ -22,7 +22,7 @@
   .t { font-size: 14px; color: #bbb; }
   input[type=text] { flex: 1; min-width: 0; padding: 12px; font-size: 20px; text-align: center; letter-spacing: 1px;
     border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
-  button { flex: 1; padding: 13px 8px; font-size: 17px; border: 0; border-radius: 10px; color: #fff; background: #0a84ff; }
+  button { flex: 1; padding: 13px 8px; font-size: 17px; border: 0; border-radius: 10px; color: #fff; background: #0a84ff; cursor: pointer; }
   button.green { background: #30d158; }
   button.red { background: #ff453a; }
   button.gray { background: #3a3a3c; }
@@ -30,6 +30,18 @@
   #badge.on { color: #30d158; }
   #incoming { background: #1f2a44; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
   #inText { font-size: 20px; text-align: center; }
+
+  /* 聊天区域样式 */
+  #chatSec { background: #18181a; border: 1px solid #2c2c2e; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  #chatHeader { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #aaa; }
+  #btnClearChat { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; border-radius: 6px; background: #2c2c2e; color: #bbb; }
+  #chatBox { height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px; background: #111; border-radius: 8px; }
+  .msg { max-width: 82%; padding: 8px 12px; border-radius: 12px; font-size: 15px; line-height: 1.4; word-break: break-word; }
+  .msg.me { align-self: flex-end; background: #0a84ff; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.peer { align-self: flex-start; background: #2c2c2e; color: #eee; border-bottom-left-radius: 4px; }
+  .msg-meta { font-size: 11px; opacity: 0.75; margin-bottom: 2px; }
+  #chatInput { flex: 1; min-width: 0; padding: 10px 12px; font-size: 16px; text-align: left; letter-spacing: 0; border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
+  #btnSend { flex: 0 0 76px; padding: 10px 8px; font-size: 16px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -74,15 +86,24 @@
       <button id="btnCam" class="gray">关摄像头</button>
       <button id="btnHang" class="red">挂断</button>
     </div>
+
+    <!-- 文字消息区域：上线后随时可发，通话中也可用 -->
+    <div id="chatSec" hidden>
+      <div id="chatHeader">
+        <span id="chatTitle">文字消息（直连传输，不经过服务器存储）</span>
+        <button id="btnClearChat" type="button">清空</button>
+      </div>
+      <div id="chatBox"></div>
+      <div class="row">
+        <input id="chatInput" type="text" maxlength="1000" placeholder="输入消息发给对方…">
+        <button id="btnSend" type="button">发送</button>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
 // ===== 配置 =====
-// ===== 免费 STUN + TURN（Metered Open Relay）配置 =====
-// 先在 https://www.metered.ca/ 注册免费账号，创建 TURN Credential，
-// 在 Get credential -> Show API Key 复制该凭据专属 API Key。
-// 将下面两项替换为你自己的值；不要把账号 Secret Key 放在网页里。
 const METERED_APP = 'yangyyg'; // 对应 yangyyg.metered.live
 const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
 
@@ -115,13 +136,12 @@ async function loadTurnCredentials() {
     return false;
   }
 }
+
 const PREFIX = 'wrtc-';                 // 号码在公共服务器上的前缀，减少与别人撞号
 const PEERJS_URLS = [
   'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js',
   'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js',
 ];
-// 默认用 PeerJS 官方公共信令服务器 0.peerjs.com。
-// 自建 PeerServer 时在网址后加：?host=你的域名&port=443&path=/&secure=1
 const q = new URLSearchParams(location.search);
 const PEER_OPTS = { debug: 1, config: RTC_CONFIG };
 if (q.get('host')) {
@@ -134,6 +154,7 @@ const RING_MS = Number(q.get('ring')) || 40000;   // 呼叫/来电最长等待�
 
 const $ = (id) => document.getElementById(id);
 let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
+let chatConns = {}; // 缓存已建立的聊天 DataConnection，key 为完整 peerId
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
@@ -178,6 +199,7 @@ function render() {
   $('sDial').hidden = !online || !!call || !!incoming;
   $('incoming').hidden = !incoming;
   $('ctrl').hidden = !call;
+  $('chatSec').hidden = !online;
 }
 
 function clearCallTimers() {
@@ -211,12 +233,134 @@ function cleanupCall(msg, isError = false) {
   }
 }
 
+// ===== 文字消息渲染与收发 =====
+function nowTimeStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function appendChatMessage(senderLabel, text, isMe) {
+  const box = $('chatBox');
+  const item = document.createElement('div');
+  item.className = 'msg ' + (isMe ? 'me' : 'peer');
+
+  const meta = document.createElement('div');
+  meta.className = 'msg-meta';
+  meta.textContent = `${senderLabel} · ${nowTimeStr()}`;
+
+  const body = document.createElement('div');
+  body.textContent = text;
+
+  item.appendChild(meta);
+  item.appendChild(body);
+  box.appendChild(item);
+  box.scrollTop = box.scrollHeight;
+}
+
+function bindDataConnection(conn) {
+  if (!conn || !conn.peer) return;
+  chatConns[conn.peer] = conn;
+
+  conn.on('data', (data) => {
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'chat' && typeof data.text === 'string') {
+      const fromCode = String(conn.peer).replace(PREFIX, '');
+      // 收到消息时，如果当前没在通话且对方号码框为空，自动填入方便直接回复
+      if (!call && !incoming && !$('peerCode').value.trim()) {
+        $('peerCode').value = fromCode;
+        store.set('peerCode', fromCode);
+      }
+      appendChatMessage(fromCode, data.text, false);
+      if (!call && !incoming) {
+        setStatus(`收到来自 ${fromCode} 的新消息`);
+      }
+    } else if (data.type === 'reject' && call && call.peer === conn.peer) {
+      cleanupCall('对方已拒绝来电');
+    } else if (data.type === 'busy' && call && call.peer === conn.peer) {
+      cleanupCall('对方正在通话中');
+    } else if (data.type === 'cancel' && incoming && incoming.peer === conn.peer) {
+      clearCallTimers();
+      const inc = incoming;
+      incoming = null;
+      try { inc.close(); } catch (e) {}
+      render();
+      setStatus('对方已取消呼叫');
+    }
+  });
+
+  conn.on('close', () => {
+    if (chatConns[conn.peer] === conn) {
+      delete chatConns[conn.peer];
+    }
+  });
+
+  conn.on('error', () => {
+    if (chatConns[conn.peer] === conn) {
+      delete chatConns[conn.peer];
+    }
+  });
+}
+
+function getActiveTargetCode() {
+  if (call && call.peer) return String(call.peer).replace(PREFIX, '');
+  if (incoming && incoming.peer) return String(incoming.peer).replace(PREFIX, '');
+  return $('peerCode').value.trim();
+}
+
+function sendChatMessage() {
+  if (!peer || !online) return setStatus('请先上线后再发送消息');
+  const text = $('chatInput').value.trim();
+  if (!text) return;
+
+  const targetCode = getActiveTargetCode();
+  if (!validCode(targetCode)) return setStatus('请先填写对方的号码（3～20 位字母或数字）');
+  const fullTarget = PREFIX + targetCode;
+  if (fullTarget === peer.id) return setStatus('不能给自己发消息');
+
+  store.set('peerCode', targetCode);
+  $('chatInput').value = '';
+
+  const payload = { type: 'chat', text };
+  const existing = chatConns[fullTarget];
+
+  if (existing && existing.open) {
+    try {
+      existing.send(payload);
+      appendChatMessage('我 -> ' + targetCode, text, true);
+      return;
+    } catch (e) {
+      delete chatConns[fullTarget];
+    }
+  }
+
+  // 尚未建立连接或已断开时，重新建立连接并发送
+  try {
+    const conn = peer.connect(fullTarget, { reliable: true });
+    bindDataConnection(conn);
+    conn.on('open', () => {
+      try {
+        conn.send(payload);
+        appendChatMessage('我 -> ' + targetCode, text, true);
+      } catch (e) {
+        setStatus('消息发送失败，请重试');
+      }
+    });
+    conn.on('error', () => {
+      setStatus('无法连接到对方，对方可能不在线');
+    });
+  } catch (e) {
+    setStatus('发送失败：' + (e.message || e));
+  }
+}
+
 // ===== 上线（注册固定号码）=====
 function goOnline() {
   const code = $('myCode').value.trim();
   if (!PeerCtor) return setStatus('通话库还没加载好，请稍等或检查网络');
   if (!validCode(code)) return setStatus('号码只能是 3～20 位字母或数字');
   if (peer) { try { peer.destroy(); } catch (e) {} peer = null; }
+  chatConns = {};
   online = false; render();
   store.set('myCode', code);
   setStatus('正在上线…');
@@ -225,26 +369,12 @@ function goOnline() {
   p.on('open', () => {
     if (peer !== p) return;
     online = true; render();
-    setStatus('已上线，号码 ' + code + '。可以拨打，也可以等对方来电（请保持本页面打开）');
+    setStatus('已上线，号码 ' + code + '。可以拨打、发消息，或等对方来电');
   });
   p.on('call', onIncoming);
   p.on('connection', (conn) => {
     if (peer !== p) return;
-    conn.on('data', (data) => {
-      if (!data || typeof data !== 'object') return;
-      if (data.type === 'reject' && call && call.peer === conn.peer) {
-        cleanupCall('对方已拒绝来电');
-      } else if (data.type === 'busy' && call && call.peer === conn.peer) {
-        cleanupCall('对方正在通话中');
-      } else if (data.type === 'cancel' && incoming && incoming.peer === conn.peer) {
-        clearCallTimers();
-        const inc = incoming;
-        incoming = null;
-        try { inc.close(); } catch (e) {}
-        render();
-        setStatus('对方已取消呼叫');
-      }
-    });
+    bindDataConnection(conn);
   });
   p.on('disconnected', () => {
     if (peer !== p) return;
@@ -258,7 +388,7 @@ function onPeerError(err) {
   const t = err && err.type;
   if (t === 'peer-unavailable') {
     if (call && !$('remote').srcObject) cleanupCall('对方不在线（对方需要先打开本页面并上线）');
-    else setStatus('对方不在线');
+    else setStatus('对方不在线（对方需要先打开本页面并上线）');
     return;
   }
   if (t === 'unavailable-id') { online = false; render(); return setStatus('这个号码已被占用（可能别人在用，或你在另一个页面已上线），请换一个号码'); }
@@ -272,7 +402,6 @@ function onPeerError(err) {
 async function getMedia(video) {
   const audio = { echoCancellation: true, noiseSuppression: true };
   try {
-    // 必须在点击事件里直接调用，iOS 才会弹出权限框
     localStream = await navigator.mediaDevices.getUserMedia({ audio, video: video ? { facingMode: 'user' } : false });
   } catch (e) {
     if (video) {
@@ -288,7 +417,7 @@ async function getMedia(video) {
   $('btnCam').hidden = !hasVideo;
   $('btnMute').textContent = '静音';
   $('btnCam').textContent = '关摄像头';
-  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {} // 通话时保持亮屏
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
   return true;
 }
 
@@ -300,11 +429,15 @@ function stopMedia() {
 
 function sendSignal(targetPeerId, payload) {
   if (!targetPeerId || !peer || peer.destroyed) return;
+  const existing = chatConns[targetPeerId];
+  if (existing && existing.open) {
+    try { existing.send(payload); return; } catch (e) {}
+  }
   try {
     const conn = peer.connect(targetPeerId, { reliable: true });
+    bindDataConnection(conn);
     conn.on('open', () => {
       try { conn.send(payload); } catch (e) {}
-      setTimeout(() => { try { conn.close(); } catch (e) {} }, 400);
     });
     conn.on('error', () => {});
   } catch (e) {}
@@ -321,7 +454,7 @@ function attachCall(c) {
     if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
     const v = $('remote');
     if (v.srcObject !== rs) v.srcObject = rs;
-    v.play().catch(() => { $('tap').hidden = false; }); // 被系统拦截时，让用户点一下
+    v.play().catch(() => { $('tap').hidden = false; });
     if (isFirstStream) startDurationTimer();
   });
 
@@ -335,7 +468,6 @@ function attachCall(c) {
     cleanupCall((e && e.type) || String(e), true);
   });
 
-  // 底层 RTCPeerConnection 状态监听兜底，防止未接通前拒接时 close 事件延迟或丢失
   const pc = c.peerConnection;
   if (pc) {
     const onPcStateChange = () => {
@@ -362,18 +494,14 @@ async function dial(video) {
   store.set('peerCode', target);
   const fullTarget = PREFIX + target;
 
-  // 预建控制通道，接收对方拒接/忙线等即时通知
   closeCtrlConn();
-  try {
-    const conn = peer.connect(fullTarget, { reliable: true });
-    ctrlConn = conn;
-    conn.on('data', (data) => {
-      if (!data || typeof data !== 'object' || !call) return;
-      if (data.type === 'reject') cleanupCall('对方已拒绝来电');
-      else if (data.type === 'busy') cleanupCall('对方正在通话中');
-    });
-    conn.on('error', () => {});
-  } catch (e) {}
+  if (!chatConns[fullTarget] || !chatConns[fullTarget].open) {
+    try {
+      const conn = peer.connect(fullTarget, { reliable: true });
+      ctrlConn = conn;
+      bindDataConnection(conn);
+    } catch (e) {}
+  }
 
   const c = peer.call(fullTarget, localStream, {
     metadata: { video: localStream.getVideoTracks().length > 0 }
@@ -395,7 +523,7 @@ function onIncoming(c) {
     sendSignal(c.peer, { type: 'busy' });
     try { c.close(); } catch (e) {}
     return;
-  } // 忙线
+  }
   incoming = c;
   const from = String(c.peer).replace(PREFIX, '');
   const video = !!(c.metadata && c.metadata.video);
@@ -403,7 +531,6 @@ function onIncoming(c) {
   setStatus('有来电');
   render();
 
-  // 如果主叫在接听前主动取消，监听底层连接断开及时收起来电弹窗
   const pc = c.peerConnection;
   if (pc) {
     const onInPcChange = () => {
@@ -433,7 +560,7 @@ function onIncoming(c) {
 async function accept() {
   const c = incoming;
   if (!c) return;
-  const video = !!(c.metadata && c.metadata.video);   // 与来电保持同一种模式
+  const video = !!(c.metadata && c.metadata.video);
   if (!(await getMedia(video))) return reject();
   clearTimeout(inTimer);
   incoming = null;
@@ -464,13 +591,21 @@ function hangup(msg) {
   cleanupCall(msg || '已挂断', false);
 }
 
-// ===== 按钮 =====
+// ===== 按钮与事件 =====
 $('btnOnline').onclick = goOnline;
 $('btnVoice').onclick = () => dial(false);
 $('btnVideo').onclick = () => dial(true);
 $('btnAccept').onclick = accept;
 $('btnReject').onclick = reject;
 $('btnHang').onclick = () => hangup();
+$('btnSend').onclick = sendChatMessage;
+$('chatInput').onkeydown = (e) => {
+  if (e.key === 'Enter' && !e.isComposing) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+};
+$('btnClearChat').onclick = () => { $('chatBox').innerHTML = ''; };
 $('tap').onclick = () => { $('remote').play(); $('tap').hidden = true; };
 $('btnMute').onclick = () => {
   const t = localStream && localStream.getAudioTracks()[0];
@@ -484,12 +619,12 @@ $('btnCam').onclick = () => {
   t.enabled = !t.enabled;
   $('btnCam').textContent = t.enabled ? '关摄像头' : '开摄像头';
 };
-// 从后台切回来时，如果和服务器断了就重连
+
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && peer && !peer.destroyed && peer.disconnected) { try { peer.reconnect(); } catch (e) {} }
 });
 
-// ===== 启动：加载 PeerJS 库，有保存的号码就自动上线 =====
+// ===== 启动 =====
 function loadScript(src) {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
@@ -499,7 +634,7 @@ function loadScript(src) {
 }
 (async function boot() {
   const firstRun = !store.get('myCode');
-  if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000))); // 首次随机生成，之后固定不变
+  if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000)));
   $('myCode').value = store.get('myCode');
   $('peerCode').value = store.get('peerCode');
   render();
