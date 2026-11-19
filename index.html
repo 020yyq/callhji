@@ -63,6 +63,15 @@
   #imgModal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.9); z-index: 999;
     display: flex; align-items: center; justify-content: center; padding: 16px; }
   #imgModal img { max-width: 100%; max-height: 88vh; border-radius: 8px; object-fit: contain; }
+  /* SIP 模式 */
+  input[type=text].field, input[type=password].field { flex: 1; min-width: 0; padding: 12px; font-size: 16px; text-align: left; letter-spacing: 0;
+    border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
+  input.field:disabled { opacity: 0.6; }
+  #sipBadge { font-size: 14px; color: #888; }
+  #sipBadge.on { color: #30d158; }
+  #sipLogBox summary { font-size: 13px; color: #888; cursor: pointer; }
+  #sipLog { margin: 6px 0 0; max-height: 150px; overflow-y: auto; font-size: 11px; line-height: 1.5; color: #9bc79b;
+    white-space: pre-wrap; word-break: break-all; background: #0b0b0b; padding: 8px; border-radius: 8px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -76,6 +85,12 @@
   <div id="status">正在加载…</div>
 
   <div id="panel">
+    <!-- 模式切换：号码通话（点对点，PeerJS）/ SIP 通话（SIP over WebSocket，JsSIP）。两种模式同一时间只用一种 -->
+    <div id="modeRow" class="row">
+      <button id="btnModeP2P" type="button">号码通话</button>
+      <button id="btnModeSip" class="gray" type="button">SIP 通话</button>
+    </div>
+
     <div id="sMe" class="sec">
       <div class="t">我的号码（固定，保存在本机；别人拨这个号码找你）</div>
       <div class="row">
@@ -91,6 +106,32 @@
       <div class="row">
         <button id="btnVoice" class="green">语音通话</button>
         <button id="btnVideo">视频通话</button>
+      </div>
+    </div>
+
+    <!-- SIP 模式：注册到支持 WebSocket(wss://) 的 SIP 服务器 -->
+    <div id="sSip" class="sec" hidden>
+      <div class="t">SIP 服务器（需支持 WebSocket；本页是 https，只能用 wss://）</div>
+      <input id="sipWss" type="text" class="field" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="wss://sip.example.com:8089/ws">
+      <input id="sipUri" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="账号：1001@sip.example.com">
+      <input id="sipAuth" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="认证用户名（可留空，默认同账号分机号）">
+      <input id="sipPass" type="password" class="field" autocomplete="off" placeholder="密码">
+      <div class="row">
+        <button id="btnSipReg" class="green" type="button">注册</button>
+      </div>
+      <div id="sipBadge">○ 未注册</div>
+      <details id="sipLogBox">
+        <summary>事件日志（排查连接/注册问题用）</summary>
+        <pre id="sipLog"></pre>
+      </details>
+    </div>
+
+    <div id="sSipDial" class="sec" hidden>
+      <div class="t">对方分机号或 SIP 地址（如 1002 或 1002@sip.example.com）</div>
+      <input id="sipTarget" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="对方分机号 / SIP 地址">
+      <div class="row">
+        <button id="btnSipVoice" class="green" type="button">语音通话</button>
+        <button id="btnSipVideo" type="button">视频通话</button>
       </div>
     </div>
 
@@ -142,6 +183,15 @@
 </div>
 
 <script>
+// 兜底：主脚本如果有语法/运行错误，页面会一直停在“正在加载…”，这里把错误显示出来方便排查
+window.addEventListener('error', function (e) {
+  var s = document.getElementById('status');
+  if (s && /加载/.test(s.textContent)) {
+    s.textContent = '页面脚本出错：' + (e.message || '未知错误') + (e.lineno ? '（第 ' + e.lineno + ' 行）' : '');
+  }
+});
+</script>
+<script>
 // ===== 配置 =====
 const METERED_APP = 'yangyyg'; // 对应 yangyyg.metered.live
 const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
@@ -191,6 +241,12 @@ const PEERJS_URLS = [
   'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js',
   'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js',
 ];
+// SIP 模式用的 JsSIP（只在第一次点“注册”时才加载）
+const JSSIP_URLS = [
+  'https://cdn.jsdelivr.net/npm/jssip@3.10.1/dist/jssip.min.js',
+  'https://unpkg.com/jssip@3.10.1/dist/jssip.min.js',
+  'https://cdn.jsdelivr.net/npm/jssip@3/dist/jssip.min.js',
+];
 const q = new URLSearchParams(location.search);
 const PEER_OPTS = { debug: 1, config: RTC_CONFIG };
 if (q.get('host')) {
@@ -209,6 +265,21 @@ let seenMailboxIds = new Set();
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
+
+// SIP 模式状态
+let appMode = 'p2p';            // 'p2p' | 'sip'
+let SipLib = null;              // window.JsSIP
+let sipUA = null;               // JsSIP.UA
+let sipRegistered = false;
+let sipState = 'idle';          // 'idle' | 'connecting' | 'failed'（已注册时看 sipRegistered）
+let sipEverConnected = false;
+let sipRegToken = 0;
+let sipHost = '';               // 我的账号域名（不含端口），拨短号时拼接
+let sipSession = null;          // 呼出中 / 已接通的会话
+let sipIncoming = null;         // 等待接听的来电
+let sipIncomingVideo = false;
+let sipRemoteStream = null;
+const sipLogLines = [];
 
 const setStatus = (t) => { $('status').textContent = t; };
 const store = {
@@ -236,7 +307,7 @@ function startDurationTimer() {
   callStartTime = Date.now();
   setStatus('通话中 00:00（请保持本页面在前台）');
   durationTimer = setInterval(() => {
-    if (!call) return stopDurationTimer();
+    if (!call && !sipSession) return stopDurationTimer();
     const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
     setStatus(`通话中 ${formatDuration(elapsed)}（请保持本页面在前台）`);
   }, 1000);
@@ -386,11 +457,12 @@ function isUserAwayOrBusy() {
   return document.hidden || !!call || !!incoming;
 }
 
-function recordMissedItem(kind, fromCode, detail, reason, customTime) {
+function recordMissedItem(kind, fromCode, detail, reason, customTime, via) {
   if (!fromCode) return;
   const entry = {
     id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7),
     kind, // 'call' | 'msg'
+    via: via || 'p2p', // 'p2p' | 'sip'：未接提醒按当前模式分开显示
     fromCode,
     detail: detail || '',
     reason: reason || '',
@@ -405,19 +477,22 @@ function recordMissedItem(kind, fromCode, detail, reason, customTime) {
 }
 
 function clearMissedItems() {
-  missedItems = [];
+  // 只清空当前模式下的提醒
+  missedItems = missedItems.filter(x => (x.via || 'p2p') !== appMode);
   saveMissedToStore();
   renderMissed();
 }
 
 function renderMissed() {
   // 只有上线后才展示未接来电与离线期间的呼叫/信息提醒
-  const count = missedItems.length;
-  $('missedSec').hidden = !online || count === 0;
-  if (!online || count === 0) return;
+  const visibleMissed = missedItems.filter(x => (x.via || 'p2p') === appMode);
+  const count = visibleMissed.length;
+  const active = appMode === 'sip' ? sipRegistered : online;
+  $('missedSec').hidden = !active || count === 0;
+  if (!active || count === 0) return;
 
-  const callCount = missedItems.filter(x => x.kind === 'call').length;
-  const msgCount = missedItems.filter(x => x.kind === 'msg').length;
+  const callCount = visibleMissed.filter(x => x.kind === 'call').length;
+  const msgCount = visibleMissed.filter(x => x.kind === 'msg').length;
   const parts = [];
   if (callCount > 0) parts.push(`未接来电 ${callCount}`);
   if (msgCount > 0) parts.push(`未接信息 ${msgCount}`);
@@ -425,7 +500,7 @@ function renderMissed() {
 
   const list = $('missedList');
   list.innerHTML = '';
-  for (const item of missedItems) {
+  for (const item of visibleMissed) {
     const row = document.createElement('div');
     row.className = 'missed-item';
 
@@ -453,6 +528,12 @@ function renderMissed() {
     row.appendChild(tag);
 
     row.onclick = () => {
+      if (appMode === 'sip') {
+        $('sipTarget').value = item.fromCode;
+        store.set('sipTarget', item.fromCode);
+        setStatus(`已填入号码 ${item.fromCode}`);
+        return;
+      }
       $('peerCode').value = item.fromCode;
       store.set('peerCode', item.fromCode);
       if (item.kind === 'msg') {
@@ -466,13 +547,21 @@ function renderMissed() {
 }
 
 function render() {
+  const busy = !!call || !!incoming || !!sipSession || !!sipIncoming;
+  const p2p = appMode === 'p2p';
+  $('btnModeP2P').className = p2p ? '' : 'gray';
+  $('btnModeSip').className = p2p ? 'gray' : '';
+  $('modeRow').hidden = busy;
   $('badge').textContent = online ? '● 在线' : '○ 离线';
   $('badge').className = online ? 'on' : '';
-  $('sMe').hidden = !!call || !!incoming;
-  $('sDial').hidden = !online || !!call || !!incoming;
-  $('incoming').hidden = !incoming;
-  $('ctrl').hidden = !call;
-  $('chatSec').hidden = !online;
+  $('sMe').hidden = busy || !p2p;
+  $('sDial').hidden = !online || busy || !p2p;
+  $('sSip').hidden = busy || p2p;
+  $('sSipDial').hidden = !sipRegistered || busy || p2p;
+  $('incoming').hidden = !(incoming || sipIncoming);
+  $('ctrl').hidden = !(call || sipSession);
+  $('chatSec').hidden = !online || !p2p;
+  renderSip();
   renderMissed();
 }
 
@@ -1010,6 +1099,7 @@ function onIncoming(c) {
 }
 
 async function accept() {
+  if (sipIncoming) return sipAccept();
   const c = incoming;
   if (!c) return;
   const video = !!(c.metadata && c.metadata.video);
@@ -1024,6 +1114,7 @@ async function accept() {
 }
 
 function reject() {
+  if (sipIncoming) return sipReject();
   clearTimeout(inTimer);
   const c = incoming;
   incoming = null;
@@ -1039,12 +1130,458 @@ function reject() {
 }
 
 function hangup(msg) {
+  if (sipSession) return sipHangup(msg);
   const c = call;
   if (c && !$('remote').srcObject && c.peer) {
     sendSignal(c.peer, { type: 'cancel' });
   }
   cleanupCall(msg || '已挂断', false);
 }
+
+// ===== SIP 模式（SIP over WebSocket，使用 JsSIP）=====
+// 说明：浏览器只能通过 WebSocket 连 SIP 服务器，所以服务器必须提供 wss:// 入口，
+// 并支持 WebRTC 媒体（ICE + DTLS-SRTP，例如 Asterisk 的 WebRTC 配置 / FreeSWITCH / Kamailio+rtpengine）。
+const SIP_CAUSE_TEXT = {
+  'Busy': '对方正在通话中',
+  'Rejected': '对方拒绝了来电',
+  'Unavailable': '对方暂时无法接通',
+  'Not Found': '号码不存在或对方未注册',
+  'Address Incomplete': '号码不完整',
+  'Canceled': '呼叫已取消',
+  'No Answer': '对方无应答',
+  'Expires': '呼叫超时',
+  'Request Timeout': '服务器无响应（请求超时）',
+  'Connection Error': '与 SIP 服务器的连接出错',
+  'Authentication Error': '认证失败（检查账号/密码）',
+  'Incompatible SDP': '媒体协商失败（编码不兼容）',
+  'Missing SDP': '媒体协商失败（缺少 SDP）',
+  'Bad Media Description': '媒体协商失败（媒体描述无效）',
+  'RTP Timeout': '媒体超时（长时间没有收到对方声音）',
+  'User Denied Media Access': '无法使用麦克风/摄像头',
+  'Redirected': '呼叫被重定向',
+};
+
+function sipLog(t) {
+  sipLogLines.push(nowTimeStr() + ' ' + t);
+  if (sipLogLines.length > 40) sipLogLines.shift();
+  const el = $('sipLog');
+  el.textContent = sipLogLines.join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+function sipCauseText(e) {
+  const cause = e && e.cause ? String(e.cause) : '';
+  const code = e && e.message && e.message.status_code ? e.message.status_code : 0;
+  const base = SIP_CAUSE_TEXT[cause] || ('呼叫失败' + (cause ? '：' + cause : ''));
+  return code ? `${base}（SIP ${code}）` : base;
+}
+
+async function ensureJsSIP() {
+  if (SipLib) return SipLib;
+  for (const url of JSSIP_URLS) {
+    try { await loadScript(url); } catch (e) { continue; }
+    if (window.JsSIP) { SipLib = window.JsSIP; return SipLib; }
+  }
+  return null;
+}
+
+async function ensurePeerLib() {
+  if (PeerCtor) return PeerCtor;
+  for (const url of PEERJS_URLS) {
+    try { await loadScript(url); } catch (e) { continue; }
+    PeerCtor = window.Peer || (window.peerjs && window.peerjs.Peer);
+    if (PeerCtor) break;
+  }
+  return PeerCtor;
+}
+
+const normalizeSipAccount = (raw) => String(raw || '').trim().replace(/^sips?:/i, '');
+
+function loadSipFields() {
+  $('sipWss').value = store.get('sipWss');
+  $('sipUri').value = store.get('sipUri');
+  $('sipAuth').value = store.get('sipAuth');
+  $('sipPass').value = store.get('sipPass');
+  $('sipTarget').value = store.get('sipTarget');
+}
+
+function renderSip() {
+  const badge = $('sipBadge');
+  if (sipRegistered) badge.textContent = '● 已注册 ' + normalizeSipAccount($('sipUri').value);
+  else if (sipState === 'connecting') badge.textContent = '… 连接 / 注册中';
+  else if (sipState === 'failed') badge.textContent = '× 未注册（连接或注册失败）';
+  else badge.textContent = '○ 未注册';
+  badge.className = sipRegistered ? 'on' : '';
+  const working = sipRegistered || sipState === 'connecting';
+  $('btnSipReg').textContent = working ? '注销' : (sipState === 'failed' ? '重新注册' : '注册');
+  $('btnSipReg').className = working ? 'red' : 'green';
+  ['sipWss', 'sipUri', 'sipAuth', 'sipPass'].forEach((id) => { $(id).disabled = working; });
+}
+
+// 对方地址显示：同域只显示分机号，跨域显示 user@host
+function sipRemoteAddr(s) {
+  const ri = s && s.remote_identity;
+  const uri = ri && ri.uri;
+  if (!uri) return '未知';
+  const user = uri.user || '';
+  if (!user) return String(uri);
+  return (!uri.host || uri.host === sipHost) ? user : user + '@' + uri.host;
+}
+
+// 来电的 SDP 里有没有视频
+function sipOfferHasVideo(s) {
+  try { return /^m=video\s+[1-9]/m.test((s.request && s.request.body) || ''); } catch (e) { return false; }
+}
+
+// 输入 1002 / 1002@host / sip:1002@host 都可以
+function buildSipTarget(raw) {
+  let t = String(raw || '').trim().replace(/^sips?:/i, '');
+  if (!t) return '';
+  if (t.indexOf('@') === -1) {
+    if (!sipHost || !/^[A-Za-z0-9+*#._-]+$/.test(t)) return '';
+    t = t.replace(/#/g, '%23') + '@' + sipHost;
+  } else if (!/^[^@\s]+@[^@\s]+$/.test(t)) {
+    return '';
+  }
+  return 'sip:' + t;
+}
+
+function sipTeardown() {
+  sipRegToken++;
+  const ua = sipUA;
+  sipUA = null;
+  sipRegistered = false;
+  sipState = 'idle';
+  sipEverConnected = false;
+  if (ua) { try { ua.stop(); } catch (e) {} }
+}
+
+function sipUnregister() {
+  sipTeardown();
+  sipLog('已注销');
+  setStatus('已注销 SIP');
+  render();
+}
+
+async function sipRegister() {
+  const wss = $('sipWss').value.trim();
+  const acct = normalizeSipAccount($('sipUri').value);
+  const authUser = $('sipAuth').value.trim();
+  const pass = $('sipPass').value;
+  if (!/^wss?:\/\/[^\s/]+/i.test(wss)) return setStatus('请填写 WebSocket 地址，例如 wss://sip.example.com:8089/ws');
+  if (/^ws:\/\//i.test(wss) && location.protocol === 'https:') return setStatus('本页是 https，浏览器不允许连 ws://，请改用 wss://');
+  if (!/^[^@\s]+@[^@\s]+$/.test(acct)) return setStatus('账号格式应为 分机号@域名，例如 1001@sip.example.com');
+
+  store.set('sipWss', wss);
+  store.set('sipUri', acct);
+  store.set('sipAuth', authUser);
+  store.set('sipPass', pass);
+
+  sipTeardown();
+  const token = ++sipRegToken;
+  sipState = 'connecting';
+  sipHost = acct.split('@')[1].replace(/;.*$/, '').replace(/:\d+$/, '');
+  render();
+  setStatus('正在加载 SIP 库…');
+  const lib = await ensureJsSIP();
+  if (token !== sipRegToken) return;
+  if (!lib) {
+    sipState = 'idle';
+    render();
+    return setStatus('SIP 库（JsSIP）加载失败，请检查网络后重试');
+  }
+
+  let ua;
+  try {
+    const cfg = {
+      sockets: [new lib.WebSocketInterface(wss)],
+      uri: 'sip:' + acct,
+      password: pass,
+      register: true,
+      session_timers: false,
+    };
+    if (authUser) cfg.authorization_user = authUser;
+    ua = new lib.UA(cfg);
+  } catch (e) {
+    sipState = 'failed';
+    render();
+    sipLog('配置有误：' + (e.message || e));
+    return setStatus('SIP 配置有误：' + (e.message || e));
+  }
+  sipUA = ua;
+  sipLog('开始连接 ' + wss + '，账号 ' + acct);
+  setStatus('正在连接 SIP 服务器…');
+
+  ua.on('connecting', () => { if (sipUA === ua) sipLog('正在连接 WebSocket…'); });
+  ua.on('connected', () => {
+    if (sipUA !== ua) return;
+    sipEverConnected = true;
+    sipLog('WebSocket 已连接，等待注册结果');
+  });
+  ua.on('disconnected', (e) => {
+    if (sipUA !== ua) return;
+    sipRegistered = false;
+    if (sipState !== 'failed') sipState = 'connecting';
+    sipLog('WebSocket 断开' + (e && e.code ? ' code=' + e.code : '') + (e && e.reason ? ' ' + e.reason : '') + '（自动重连中）');
+    if (!sipSession && !sipIncoming) {
+      setStatus(sipEverConnected
+        ? '与 SIP 服务器的连接断开，自动重连中…'
+        : '连不上 ' + wss + '（检查地址、端口、证书是否有效）');
+    }
+    render();
+  });
+  ua.on('registered', () => {
+    if (sipUA !== ua) return;
+    sipRegistered = true;
+    sipState = 'idle';
+    sipLog('注册成功');
+    if (!sipSession && !sipIncoming) setStatus('已注册 ' + acct + '，可以拨打或等待来电');
+    render();
+  });
+  ua.on('unregistered', () => {
+    if (sipUA !== ua) return;
+    sipRegistered = false;
+    sipLog('已从服务器注销');
+    render();
+  });
+  ua.on('registrationFailed', (e) => {
+    if (sipUA !== ua) return;
+    sipRegistered = false;
+    sipState = 'failed';
+    const code = e && e.response ? e.response.status_code : 0;
+    const cause = e && e.cause ? String(e.cause) : '';
+    const authHint = (code === 401 || code === 403 || cause === 'Authentication Error') ? '（账号/密码/认证用户名不对？）' : '';
+    sipLog('注册失败：' + cause + (code ? ' SIP ' + code : '') + authHint);
+    if (!sipSession && !sipIncoming) {
+      setStatus('注册失败：' + (SIP_CAUSE_TEXT[cause] || cause || '未知原因') + (code ? '（SIP ' + code + '）' : '') + authHint + ' 可修改后点“重新注册”');
+    }
+    render();
+  });
+  ua.on('newRTCSession', (data) => {
+    if (sipUA !== ua) return;
+    const s = data.session;
+    if (data.originator === 'remote') {
+      onSipIncoming(s);
+    } else {
+      sipSession = s;
+      wireSipSession(s);
+      render();
+    }
+  });
+  ua.start();
+}
+
+// 远端媒体：把收到的音/视频轨道合并进同一个 MediaStream 再给 <video>
+function onSipTrack(s, ev) {
+  if (sipSession !== s || !ev || !ev.track) return;
+  if (!sipRemoteStream) sipRemoteStream = new MediaStream();
+  if (!sipRemoteStream.getTracks().includes(ev.track)) sipRemoteStream.addTrack(ev.track);
+  const v = $('remote');
+  if (v.srcObject !== sipRemoteStream) v.srcObject = sipRemoteStream;
+  v.play().catch(() => { $('tap').hidden = false; });
+}
+
+const sipHookedPcs = new WeakSet();
+function hookSipPc(s, pc) {
+  if (!pc || sipHookedPcs.has(pc)) return;
+  sipHookedPcs.add(pc);
+  pc.addEventListener('track', (ev) => onSipTrack(s, ev));
+}
+
+// 兜底：万一 track 事件没赶上，接通后手动把接收器里的轨道补进来
+function syncSipRemote(s) {
+  const pc = s && s.connection;
+  if (!pc || sipSession !== s) return;
+  try {
+    pc.getReceivers().forEach((r) => {
+      if (r.track && r.track.readyState === 'live') onSipTrack(s, { track: r.track });
+    });
+  } catch (e) {}
+}
+
+function wireSipSession(s) {
+  hookSipPc(s, s.connection);
+  s.on('peerconnection', (e) => hookSipPc(s, e.peerconnection));
+  s.on('progress', () => {
+    if (sipSession === s && !callStartTime) { setStatus('对方振铃中…'); sipLog('对方振铃中'); }
+  });
+  s.on('accepted', () => {
+    if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
+    if (sipSession === s && !callStartTime) setStatus('正在连接…');
+  });
+  s.on('confirmed', () => {
+    if (sipSession !== s) return;
+    if (ringTimer) { clearTimeout(ringTimer); ringTimer = null; }
+    sipLog('通话已接通');
+    syncSipRemote(s);
+    if (!callStartTime) startDurationTimer();
+  });
+  s.on('ended', () => {
+    if (sipSession === s) sipCleanup('通话已结束');
+  });
+  s.on('failed', (e) => {
+    if (sipSession === s) return sipCleanup(sipCauseText(e));
+    if (sipIncoming === s) {
+      // 还没接听，对方先挂了
+      const from = sipRemoteAddr(s);
+      const modeLabel = sipIncomingVideo ? '视频' : '语音';
+      clearCallTimers();
+      sipIncoming = null;
+      recordMissedItem('call', from, modeLabel, (e && e.cause === 'Canceled') ? '对方已取消' : '来电中断', undefined, 'sip');
+      sipLog('来电中断：' + (e && e.cause ? e.cause : ''));
+      render();
+      setStatus('对方已取消呼叫（已记录未接来电）');
+    }
+  });
+}
+
+function sipCleanup(msg) {
+  const finalDuration = callStartTime ? formatDuration(Math.floor((Date.now() - callStartTime) / 1000)) : '';
+  callStartTime = 0;
+  clearCallTimers();
+  sipSession = null;
+  sipIncoming = null;
+  sipRemoteStream = null;
+  stopMedia();
+  render();
+  if (msg) setStatus(msg + (finalDuration ? `（时长 ${finalDuration}）` : ''));
+  sipLog((msg || '会话结束') + (finalDuration ? ' 时长 ' + finalDuration : ''));
+}
+
+function onSipIncoming(s) {
+  const from = sipRemoteAddr(s);
+  const video = sipOfferHasVideo(s);
+  const modeLabel = video ? '视频' : '语音';
+  sipLog('收到来电：' + from + '（' + modeLabel + '）');
+
+  if (sipSession || sipIncoming || call || incoming) {
+    try { s.terminate({ status_code: 486, reason_phrase: 'Busy Here' }); } catch (e) {}
+    recordMissedItem('call', from, modeLabel, '忙线中', undefined, 'sip');
+    return;
+  }
+
+  sipIncoming = s;
+  sipIncomingVideo = video;
+  wireSipSession(s);
+  $('inText').textContent = '来电（SIP）：' + from + (video ? '（视频）' : '（语音）');
+  setStatus('有来电');
+  render();
+
+  clearTimeout(inTimer);
+  inTimer = setTimeout(() => {
+    if (sipIncoming !== s) return;
+    sipIncoming = null;
+    try { s.terminate({ status_code: 480, reason_phrase: 'Temporarily Unavailable' }); } catch (e) {}
+    recordMissedItem('call', from, modeLabel, '超时未接听', undefined, 'sip');
+    render();
+    setStatus('来电已过期（已记录未接来电）');
+  }, RING_MS);
+}
+
+async function sipAccept() {
+  const s = sipIncoming;
+  if (!s) return;
+  if (!(await getMedia(sipIncomingVideo))) return sipReject();
+  if (sipIncoming !== s) { stopMedia(); return; } // 等权限弹窗期间对方已挂断
+  clearCallTimers();
+  sipIncoming = null;
+  sipSession = s;
+  setStatus('正在连接…');
+  render();
+  try {
+    s.answer({ mediaStream: localStream, pcConfig: { iceServers: RTC_CONFIG.iceServers } });
+  } catch (e) {
+    sipCleanup('接听失败：' + (e.message || e));
+  }
+}
+
+function sipReject() {
+  clearCallTimers();
+  const s = sipIncoming;
+  sipIncoming = null;
+  if (s) {
+    recordMissedItem('call', sipRemoteAddr(s), sipIncomingVideo ? '视频' : '语音', '已拒绝', undefined, 'sip');
+    try { s.terminate({ status_code: 603, reason_phrase: 'Decline' }); } catch (e) {}
+  }
+  stopMedia();
+  render();
+  setStatus('已拒绝来电');
+}
+
+function sipHangup(msg) {
+  const s = sipSession;
+  if (!s) return;
+  sipSession = null; // 先摘掉引用，事件回调里的 sipSession === s 判断就不会重复处理
+  try { s.terminate(); } catch (e) {}
+  sipCleanup(msg || '已挂断');
+}
+
+async function sipDial(video) {
+  if (!sipUA || !sipRegistered) return setStatus('请先注册到 SIP 服务器');
+  if (sipSession || sipIncoming || call || incoming) return;
+  const raw = $('sipTarget').value.trim();
+  const uri = buildSipTarget(raw);
+  if (!uri) return setStatus('请输入对方分机号或 SIP 地址，例如 1002 或 1002@' + (sipHost || 'sip.example.com'));
+  if (!(await getMedia(video))) return;
+  if (sipSession || sipIncoming) { stopMedia(); return; } // 等权限弹窗期间来电了
+
+  store.set('sipTarget', raw);
+  const hasVideo = !!(localStream && localStream.getVideoTracks().length > 0);
+  setStatus('正在呼叫 ' + raw + '…（对方需要在线并接听）');
+  sipLog('呼叫 ' + uri + (hasVideo ? '（视频）' : '（语音）'));
+  try {
+    sipUA.call(uri, {
+      mediaStream: localStream,
+      pcConfig: { iceServers: RTC_CONFIG.iceServers },
+      rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: hasVideo },
+    });
+  } catch (e) {
+    stopMedia();
+    sipLog('呼叫失败：' + (e.message || e));
+    return setStatus('呼叫失败：' + (e.message || e));
+  }
+  const s0 = sipSession;
+  if (!s0) return; // 同步失败时 failed 回调已经处理完了
+  ringTimer = setTimeout(() => {
+    if (sipSession === s0 && !s0.isEstablished()) sipHangup('对方无应答');
+  }, RING_MS);
+}
+
+function setMode(m) {
+  if (m === appMode) return;
+  if (call || incoming || sipSession || sipIncoming) return setStatus('通话中不能切换模式');
+  appMode = m;
+  store.set('mode', m);
+  if (m === 'sip') {
+    // 进入 SIP 模式：号码通话下线，释放号码
+    const old = peer;
+    peer = null;
+    chatConns = {};
+    online = false;
+    if (old) { try { old.destroy(); } catch (e) {} }
+    setStatus('SIP 模式：填好服务器信息后点“注册”（号码通话已下线）');
+  } else {
+    sipTeardown();
+    sipLog('切回号码模式，已注销');
+    setStatus('正在切回号码通话…');
+    const code = $('myCode').value.trim();
+    ensurePeerLib().then(() => {
+      if (appMode !== 'p2p') return;
+      if (validCode(code)) goOnline();
+      else setStatus('请先填写我的号码，再点“上线”');
+    });
+  }
+  render();
+}
+
+$('btnModeP2P').onclick = () => setMode('p2p');
+$('btnModeSip').onclick = () => setMode('sip');
+$('btnSipReg').onclick = () => {
+  if (sipRegistered || sipState === 'connecting') sipUnregister();
+  else sipRegister();
+};
+$('btnSipVoice').onclick = () => sipDial(false);
+$('btnSipVideo').onclick = () => sipDial(true);
 
 // ===== 按钮与事件 =====
 $('btnOnline').onclick = goOnline;
@@ -1097,20 +1634,22 @@ function loadScript(src) {
 (async function boot() {
   loadMissedFromStore();
   loadSeenMailboxIds();
+  appMode = store.get('mode') === 'sip' ? 'sip' : 'p2p';
+  loadSipFields();
   const firstRun = !store.get('myCode');
   if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000)));
   $('myCode').value = store.get('myCode');
   $('peerCode').value = store.get('peerCode');
   render();
-  for (const url of PEERJS_URLS) {
-    try { await loadScript(url); } catch (e) { continue; }
-    PeerCtor = window.Peer || (window.peerjs && window.peerjs.Peer);
-    if (PeerCtor) break;
+  if (appMode === 'p2p') {
+    if (!(await ensurePeerLib())) return setStatus('通话库加载失败，请检查网络后刷新页面');
+  } else {
+    ensurePeerLib(); // SIP 模式下后台预加载，切回号码模式时直接可用
   }
-  if (!PeerCtor) return setStatus('通话库加载失败，请检查网络后刷新页面');
   await loadTurnCredentials();
   if (firstRun) setStatus('这是为你生成的固定号码，也可以改成好记的；点“上线”后把号码告诉对方');
-  else goOnline();
+  else if (appMode === 'p2p') goOnline();
+  else setStatus('SIP 模式：填好服务器信息后点“注册”');
 })();
 </script>
 </body>
