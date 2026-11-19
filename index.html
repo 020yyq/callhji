@@ -67,11 +67,20 @@
   input[type=text].field, input[type=password].field { flex: 1; min-width: 0; padding: 12px; font-size: 16px; text-align: left; letter-spacing: 0;
     border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
   input.field:disabled { opacity: 0.6; }
-  #sipBadge { font-size: 14px; color: #888; }
+  #sipRegBar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  #sipBadge { font-size: 14px; color: #888; word-break: break-all; }
   #sipBadge.on { color: #30d158; }
   #sipLogBox summary { font-size: 13px; color: #888; cursor: pointer; }
   #sipLog { margin: 6px 0 0; max-height: 150px; overflow-y: auto; font-size: 11px; line-height: 1.5; color: #9bc79b;
     white-space: pre-wrap; word-break: break-all; background: #0b0b0b; padding: 8px; border-radius: 8px; }
+  /* SIP 数字键盘 */
+  #btnSipBackspace, #btnSipClear { flex: 0 0 56px; font-size: 15px; }
+  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .key-btn { padding: 12px 6px; font-size: 22px; font-weight: 500; border-radius: 12px;
+    background: #222; color: #fff; border: 1px solid #333; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; line-height: 1.1; }
+  .key-btn:active { background: #3a3a3c; }
+  .key-sub { font-size: 10px; color: #888; letter-spacing: 1px; margin-top: 2px; font-weight: 400; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -109,17 +118,19 @@
       </div>
     </div>
 
-    <!-- SIP 模式：注册到支持 WebSocket(wss://) 的 SIP 服务器 -->
+    <!-- SIP 模式：注册到支持 WebSocket(wss://) 的 SIP 服务器（登录后自动折叠表单） -->
     <div id="sSip" class="sec" hidden>
-      <div class="t">SIP 服务器（需支持 WebSocket；本页是 https，只能用 wss://）</div>
-      <input id="sipWss" type="text" class="field" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="wss://sip.example.com:8089/ws">
-      <input id="sipUri" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="账号：1001@sip.example.com">
-      <input id="sipAuth" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="认证用户名（可留空，默认同账号分机号）">
-      <input id="sipPass" type="password" class="field" autocomplete="off" placeholder="密码">
-      <div class="row">
-        <button id="btnSipReg" class="green" type="button">注册</button>
+      <div id="sipForm" class="sec">
+        <div class="t">SIP 服务器（需支持 WebSocket；本页是 https，只能用 wss://）</div>
+        <input id="sipWss" type="text" class="field" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="wss://sip.example.com:8089/ws">
+        <input id="sipUri" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="账号：1001@sip.example.com">
+        <input id="sipAuth" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="认证用户名（可留空，默认同账号分机号）">
+        <input id="sipPass" type="password" class="field" autocomplete="off" placeholder="密码">
       </div>
-      <div id="sipBadge">○ 未注册</div>
+      <div id="sipRegBar">
+        <div id="sipBadge">○ 未注册</div>
+        <button id="btnSipReg" class="green" type="button" style="flex:0 0 96px">注册</button>
+      </div>
       <details id="sipLogBox">
         <summary>事件日志（排查连接/注册问题用）</summary>
         <pre id="sipLog"></pre>
@@ -128,7 +139,25 @@
 
     <div id="sSipDial" class="sec" hidden>
       <div class="t">对方分机号或 SIP 地址（如 1002 或 1002@sip.example.com）</div>
-      <input id="sipTarget" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="对方分机号 / SIP 地址">
+      <div class="row">
+        <input id="sipTarget" type="text" class="field" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" placeholder="对方分机号 / SIP 地址">
+        <button id="btnSipBackspace" class="gray" type="button">⌫</button>
+        <button id="btnSipClear" class="gray" type="button">清空</button>
+      </div>
+      <div id="sipKeypad" class="keypad">
+        <button class="key-btn" type="button" data-digit="1">1<span class="key-sub">&nbsp;</span></button>
+        <button class="key-btn" type="button" data-digit="2">2<span class="key-sub">ABC</span></button>
+        <button class="key-btn" type="button" data-digit="3">3<span class="key-sub">DEF</span></button>
+        <button class="key-btn" type="button" data-digit="4">4<span class="key-sub">GHI</span></button>
+        <button class="key-btn" type="button" data-digit="5">5<span class="key-sub">JKL</span></button>
+        <button class="key-btn" type="button" data-digit="6">6<span class="key-sub">MNO</span></button>
+        <button class="key-btn" type="button" data-digit="7">7<span class="key-sub">PQRS</span></button>
+        <button class="key-btn" type="button" data-digit="8">8<span class="key-sub">TUV</span></button>
+        <button class="key-btn" type="button" data-digit="9">9<span class="key-sub">WXYZ</span></button>
+        <button class="key-btn" type="button" data-digit="*">*<span class="key-sub">&nbsp;</span></button>
+        <button class="key-btn" type="button" data-digit="0">0<span class="key-sub">+</span></button>
+        <button class="key-btn" type="button" data-digit="#">#<span class="key-sub">&nbsp;</span></button>
+      </div>
       <div class="row">
         <button id="btnSipVoice" class="green" type="button">语音通话</button>
         <button id="btnSipVideo" type="button">视频通话</button>
@@ -1212,6 +1241,7 @@ function renderSip() {
   else if (sipState === 'failed') badge.textContent = '× 未注册（连接或注册失败）';
   else badge.textContent = '○ 未注册';
   badge.className = sipRegistered ? 'on' : '';
+  $('sipForm').hidden = sipRegistered;
   const working = sipRegistered || sipState === 'connecting';
   $('btnSipReg').textContent = working ? '注销' : (sipState === 'failed' ? '重新注册' : '注册');
   $('btnSipReg').className = working ? 'red' : 'green';
@@ -1582,6 +1612,22 @@ $('btnSipReg').onclick = () => {
 };
 $('btnSipVoice').onclick = () => sipDial(false);
 $('btnSipVideo').onclick = () => sipDial(true);
+$('sipKeypad').onclick = (e) => {
+  const btn = e.target.closest('button[data-digit]');
+  if (!btn) return;
+  const input = $('sipTarget');
+  input.value += btn.dataset.digit;
+  store.set('sipTarget', input.value);
+};
+$('btnSipBackspace').onclick = () => {
+  const input = $('sipTarget');
+  input.value = input.value.slice(0, -1);
+  store.set('sipTarget', input.value);
+};
+$('btnSipClear').onclick = () => {
+  $('sipTarget').value = '';
+  store.set('sipTarget', '');
+};
 
 // ===== 按钮与事件 =====
 $('btnOnline').onclick = goOnline;
