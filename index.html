@@ -36,7 +36,7 @@
   #missedHeader { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; color: #ffb3ad; }
   #missedActions { display: flex; gap: 6px; }
   .mini-btn { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; border-radius: 6px; background: #3a2727; color: #ffd6d3; }
-  #missedList { max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  #missedList { max-height: 150px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
   .missed-item { background: #161212; border-radius: 8px; padding: 8px 10px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; }
   .missed-item:hover { background: #211919; }
   .missed-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -94,7 +94,7 @@
       </div>
     </div>
 
-    <!-- 未接来电与未接信息记录 -->
+    <!-- 未接来电与离线期间尝试联系的记录（上线后可见） -->
     <div id="missedSec" hidden>
       <div id="missedHeader">
         <span id="missedSummary">未接提醒（0）</span>
@@ -148,7 +148,13 @@ const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
 const MAX_IMG_RAW_BYTES = 15 * 1024 * 1024;
 const MAX_IMG_SIDE = 800;
 const IMG_JPEG_QUALITY = 0.62;
-const MAX_MISSED_ITEMS = 50;
+const MAX_MISSED_ITEMS = 80;
+
+// 离线留言信箱开关：对方在离线期间发送的呼叫/文字/图片，会暂存到信令/离线邮箱中，对方上线后自动拉取显示
+// 默认使用 ntfy.sh 公共主题（按我的号码隔离，仅用于暂存离线通知/消息，消息体做简单编码）
+const OFFLINE_MAILBOX_ENABLED = true;
+const OFFLINE_MAILBOX_BASE = 'https://ntfy.sh';
+const OFFLINE_TOPIC_PREFIX = 'wrtc-mail-';
 
 const RTC_CONFIG = {
   iceServers: [
@@ -198,7 +204,8 @@ const RING_MS = Number(q.get('ring')) || 40000;
 const $ = (id) => document.getElementById(id);
 let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
 let chatConns = {};
-let missedItems = []; // 未接来电与未接信息列表
+let missedItems = [];
+let seenMailboxIds = new Set();
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
@@ -209,6 +216,12 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
 };
 const validCode = (c) => /^[A-Za-z0-9]{3,20}$/.test(c);
+
+function nowTimeStr() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 
 function formatDuration(sec) {
   const h = Math.floor(sec / 3600);
@@ -236,6 +249,124 @@ function stopDurationTimer() {
   }
 }
 
+// ===== 离线信箱（对方未上线时暂存呼叫/文字/图片，上线后拉取显示）=====
+function encodeUtf8Base64(obj) {
+  const jsonStr = JSON.stringify(obj);
+  const bytes = new TextEncoder().encode(jsonStr);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) {
+    bin += String.fromCharCode(bytes[i]);
+  }
+  return btoa(bin);
+}
+
+function decodeUtf8Base64(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  const jsonStr = new TextDecoder().decode(bytes);
+  return JSON.parse(jsonStr);
+}
+
+function getMailboxTopic(code) {
+  return `${OFFLINE_TOPIC_PREFIX}${String(code).toLowerCase()}`;
+}
+
+async function postOfflineRecord(targetCode, record) {
+  if (!OFFLINE_MAILBOX_ENABLED || !validCode(targetCode)) return false;
+  try {
+    const topic = getMailboxTopic(targetCode);
+    const wrapped = {
+      id: record.id || (String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8)),
+      fromCode: record.fromCode,
+      kind: record.kind, // 'call' | 'chat' | 'image'
+      mode: record.mode || '',
+      text: record.text || '',
+      name: record.name || '',
+      dataUrl: record.dataUrl || '',
+      sentAt: nowTimeStr(),
+    };
+    const bodyStr = 'WRTC1:' + encodeUtf8Base64(wrapped);
+    // 控制单条离线缓存长度，避免过大导致请求失败
+    if (bodyStr.length > 650000) return false;
+
+    const resp = await fetch(`${OFFLINE_MAILBOX_BASE}/${encodeURIComponent(topic)}`, {
+      method: 'POST',
+      body: bodyStr,
+    });
+    return resp.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function pullOfflineMailbox(myCode) {
+  if (!OFFLINE_MAILBOX_ENABLED || !validCode(myCode)) return 0;
+  try {
+    const topic = getMailboxTopic(myCode);
+    const url = `${OFFLINE_MAILBOX_BASE}/${encodeURIComponent(topic)}/json?poll=1&since=24h`;
+    const resp = await fetch(url);
+    if (!resp.ok) return 0;
+    const text = await resp.text();
+    const lines = text.trim().split('
+').filter(Boolean);
+    let importedCount = 0;
+
+    for (const line of lines) {
+      let evt = null;
+      try { evt = JSON.parse(line); } catch (e) { continue; }
+      if (!evt || evt.event !== 'message' || typeof evt.message !== 'string') continue;
+      if (!evt.message.startsWith('WRTC1:')) continue;
+
+      let pkt = null;
+      try { pkt = decodeUtf8Base64(evt.message.slice(6)); } catch (e) { continue; }
+      if (!pkt || !pkt.id || !pkt.fromCode || seenMailboxIds.has(pkt.id)) continue;
+
+      seenMailboxIds.add(pkt.id);
+      importedCount++;
+
+      const timeLabel = pkt.sentAt || nowTimeStr();
+      if (pkt.kind === 'call') {
+        const modeLabel = pkt.mode || '语音';
+        recordMissedItem('call', pkt.fromCode, modeLabel, '离线时呼叫', timeLabel);
+      } else if (pkt.kind === 'chat' && typeof pkt.text === 'string') {
+        appendChatMessage(pkt.fromCode, { kind: 'text', text: pkt.text }, false, timeLabel);
+        recordMissedItem('msg', pkt.fromCode, pkt.text, '离线时收到', timeLabel);
+      } else if (pkt.kind === 'image' && typeof pkt.dataUrl === 'string' && pkt.dataUrl.startsWith('data:image/')) {
+        const uiImg = { kind: 'image', dataUrl: pkt.dataUrl, name: pkt.name || '图片' };
+        appendChatMessage(pkt.fromCode, uiImg, false, timeLabel);
+        recordMissedItem('msg', pkt.fromCode, `[图片] ${pkt.name || '图片'}`, '离线时收到', timeLabel);
+      }
+    }
+
+    if (importedCount > 0) {
+      saveSeenMailboxIds();
+      renderMissed();
+    }
+    return importedCount;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function loadSeenMailboxIds() {
+  const raw = store.get('seenMailboxIds');
+  if (!raw) { seenMailboxIds = new Set(); return; }
+  try {
+    const arr = JSON.parse(raw);
+    seenMailboxIds = new Set(Array.isArray(arr) ? arr.slice(-200) : []);
+  } catch (e) {
+    seenMailboxIds = new Set();
+  }
+}
+
+function saveSeenMailboxIds() {
+  const arr = Array.from(seenMailboxIds).slice(-200);
+  store.set('seenMailboxIds', JSON.stringify(arr));
+}
+
 // ===== 未接来电与未接信息逻辑 =====
 function loadMissedFromStore() {
   const raw = store.get('missedItems');
@@ -256,7 +387,7 @@ function isUserAwayOrBusy() {
   return document.hidden || !!call || !!incoming;
 }
 
-function recordMissedItem(kind, fromCode, detail, reason) {
+function recordMissedItem(kind, fromCode, detail, reason, customTime) {
   if (!fromCode) return;
   const entry = {
     id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7),
@@ -264,7 +395,7 @@ function recordMissedItem(kind, fromCode, detail, reason) {
     fromCode,
     detail: detail || '',
     reason: reason || '',
-    time: nowTimeStr(),
+    time: customTime || nowTimeStr(),
   };
   missedItems.unshift(entry);
   if (missedItems.length > MAX_MISSED_ITEMS) {
@@ -281,12 +412,13 @@ function clearMissedItems() {
 }
 
 function renderMissed() {
+  // 只有上线后才展示未接来电与离线期间的呼叫/信息提醒
   const count = missedItems.length;
+  $('missedSec').hidden = !online || count === 0;
+  if (!online || count === 0) return;
+
   const callCount = missedItems.filter(x => x.kind === 'call').length;
   const msgCount = missedItems.filter(x => x.kind === 'msg').length;
-  $('missedSec').hidden = count === 0;
-  if (count === 0) return;
-
   const parts = [];
   if (callCount > 0) parts.push(`未接来电 ${callCount}`);
   if (msgCount > 0) parts.push(`未接信息 ${msgCount}`);
@@ -377,12 +509,6 @@ function cleanupCall(msg, isError = false) {
 }
 
 // ===== 文字与图片消息渲染、压缩与收发 =====
-function nowTimeStr() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
 function openImagePreview(src) {
   if (!src) return;
   $('imgModalSrc').src = src;
@@ -394,14 +520,14 @@ function closeImagePreview() {
   $('imgModalSrc').src = '';
 }
 
-function appendChatMessage(senderLabel, payload, isMe) {
+function appendChatMessage(senderLabel, payload, isMe, customTime) {
   const box = $('chatBox');
   const item = document.createElement('div');
   item.className = 'msg ' + (isMe ? 'me' : 'peer');
 
   const meta = document.createElement('div');
   meta.className = 'msg-meta';
-  meta.textContent = `${senderLabel} · ${nowTimeStr()}`;
+  meta.textContent = `${senderLabel} · ${customTime || nowTimeStr()}`;
   item.appendChild(meta);
 
   if (payload && payload.kind === 'image' && typeof payload.dataUrl === 'string') {
@@ -535,8 +661,10 @@ function getActiveTargetCode() {
   return $('peerCode').value.trim();
 }
 
-function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
+function dispatchPayload(targetCode, fullTarget, payload, uiPayload, offlineMeta) {
   const existing = chatConns[fullTarget];
+  let deliveredLive = false;
+
   if (existing && existing.open) {
     try {
       existing.send(payload);
@@ -551,10 +679,22 @@ function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
   try {
     const conn = peer.connect(fullTarget, { reliable: true });
     bindDataConnection(conn);
+
+    const fallbackTimer = setTimeout(async () => {
+      if (deliveredLive || !offlineMeta) return;
+      const saved = await postOfflineRecord(targetCode, offlineMeta);
+      appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+      setStatus(saved
+        ? `对方当前未在线，已存入离线信箱（对方上线即可看到）`
+        : `对方当前未在线，直连未建立`);
+    }, 2500);
+
     conn.on('open', () => {
       setTimeout(() => {
         try {
           conn.send(payload);
+          deliveredLive = true;
+          clearTimeout(fallbackTimer);
           appendChatMessage('我 -> ' + targetCode, uiPayload, true);
           if (payload.type === 'image') setStatus('图片已发送给 ' + targetCode);
         } catch (e) {
@@ -562,8 +702,15 @@ function dispatchPayload(targetCode, fullTarget, payload, uiPayload) {
         }
       }, 150);
     });
-    conn.on('error', () => {
-      setStatus('无法连接到对方，对方可能不在线');
+
+    conn.on('error', async () => {
+      if (deliveredLive || !offlineMeta) return;
+      clearTimeout(fallbackTimer);
+      const saved = await postOfflineRecord(targetCode, offlineMeta);
+      appendChatMessage('我 -> ' + targetCode, uiPayload, true);
+      setStatus(saved
+        ? `对方当前未在线，已存入离线信箱（对方上线即可看到）`
+        : `无法连接到对方，对方可能不在线`);
     });
   } catch (e) {
     setStatus('发送失败：' + (e.message || e));
@@ -580,9 +727,16 @@ function sendChatMessage() {
   const fullTarget = PREFIX + targetCode;
   if (fullTarget === peer.id) return setStatus('不能给自己发消息');
 
+  const myCode = $('myCode').value.trim();
   store.set('peerCode', targetCode);
   $('chatInput').value = '';
-  dispatchPayload(targetCode, fullTarget, { type: 'chat', text }, { kind: 'text', text });
+  dispatchPayload(
+    targetCode,
+    fullTarget,
+    { type: 'chat', text },
+    { kind: 'text', text },
+    { fromCode: myCode, kind: 'chat', text }
+  );
 }
 
 async function handleImageSelected(file) {
@@ -602,18 +756,25 @@ async function handleImageSelected(file) {
     return;
   }
 
+  const myCode = $('myCode').value.trim();
   store.set('peerCode', targetCode);
   setStatus('正在处理图片…');
   try {
     const compressed = await compressImageFile(file);
     const payload = { type: 'image', name: compressed.name, dataUrl: compressed.dataUrl };
-    dispatchPayload(targetCode, fullTarget, payload, compressed);
+    dispatchPayload(
+      targetCode,
+      fullTarget,
+      payload,
+      compressed,
+      { fromCode: myCode, kind: 'image', name: compressed.name, dataUrl: compressed.dataUrl }
+    );
   } catch (err) {
     setStatus(err.message || '图片发送失败');
   }
 }
 
-// ===== 上线（注册固定号码）=====
+// ===== 上线（注册固定号码并拉取离线期间的呼叫/信息）=====
 function goOnline() {
   const code = $('myCode').value.trim();
   if (!PeerCtor) return setStatus('通话库还没加载好，请稍等或检查网络');
@@ -625,10 +786,17 @@ function goOnline() {
   setStatus('正在上线…');
   const p = new PeerCtor(PREFIX + code, PEER_OPTS);
   peer = p;
-  p.on('open', () => {
+  p.on('open', async () => {
     if (peer !== p) return;
-    online = true; render();
-    setStatus('已上线，号码 ' + code + '。可以拨打、发消息/图片，或等对方来电');
+    online = true;
+    render();
+    setStatus('已上线，号码 ' + code + '。正在检查离线期间的呼叫与消息…');
+    const pulled = await pullOfflineMailbox(code);
+    if (pulled > 0) {
+      setStatus(`已上线，号码 ${code}。收到 ${pulled} 条离线期间的呼叫/消息`);
+    } else {
+      setStatus('已上线，号码 ' + code + '。可以拨打、发消息/图片，或等对方来电');
+    }
   });
   p.on('call', onIncoming);
   p.on('connection', (conn) => {
@@ -646,8 +814,27 @@ function goOnline() {
 function onPeerError(err) {
   const t = err && err.type;
   if (t === 'peer-unavailable') {
-    if (call && !$('remote').srcObject) cleanupCall('对方不在线（对方需要先打开本页面并上线）');
-    else setStatus('对方不在线（对方需要先打开本页面并上线）');
+    const targetCode = call && call.peer ? String(call.peer).replace(PREFIX, '') : $('peerCode').value.trim();
+    const myCode = $('myCode').value.trim();
+    const isVideoCall = !!(call && call.metadata && call.metadata.video);
+
+    if (call && !$('remote').srcObject) {
+      if (validCode(targetCode) && validCode(myCode)) {
+        postOfflineRecord(targetCode, {
+          fromCode: myCode,
+          kind: 'call',
+          mode: isVideoCall ? '视频' : '语音',
+        }).then((saved) => {
+          cleanupCall(saved
+            ? '对方未上线，已留下呼叫记录（对方上线即可看见）'
+            : '对方不在线（对方需要先打开本页面并上线）');
+        });
+      } else {
+        cleanupCall('对方不在线（对方需要先打开本页面并上线）');
+      }
+    } else {
+      setStatus('对方不在线（对方需要先打开本页面并上线）');
+    }
     return;
   }
   if (t === 'unavailable-id') { online = false; render(); return setStatus('这个号码已被占用（可能别人在用，或你在另一个页面已上线），请换一个号码'); }
@@ -910,6 +1097,7 @@ function loadScript(src) {
 }
 (async function boot() {
   loadMissedFromStore();
+  loadSeenMailboxIds();
   const firstRun = !store.get('myCode');
   if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000)));
   $('myCode').value = store.get('myCode');
