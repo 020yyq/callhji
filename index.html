@@ -631,8 +631,11 @@ function render() {
   $('app').classList.toggle('sip-centered', !p2p && sipRegistered && !busy);
   $('authBar').hidden = busy;
   $('modeRow').hidden = busy;
-  $('badge').textContent = online ? '● 在线' : '○ 离线';
+  const loggedIn = isLoggedIn();
+  $('badge').textContent = online ? '● 在线' : (loggedIn ? '○ 离线' : '○ 需先登录才能上线');
   $('badge').className = online ? 'on' : '';
+  $('btnOnline').disabled = !loggedIn;
+  $('btnOnline').style.opacity = loggedIn ? '' : '0.55';
   $('sMe').hidden = busy || !p2p;
   $('sDial').hidden = !online || busy || !p2p;
   $('sSip').hidden = busy || p2p;
@@ -943,6 +946,11 @@ async function handleImageSelected(file) {
 
 // ===== 上线（注册固定号码并拉取离线期间的呼叫/信息）=====
 function goOnline() {
+  if (!isLoggedIn()) {
+    setStatus('请先登录后再上线');
+    openAuthModal('login');
+    return;
+  }
   const code = $('myCode').value.trim();
   if (!PeerCtor) return setStatus('通话库还没加载好，请稍等或检查网络');
   if (!validCode(code)) return setStatus('号码只能是 3～20 位字母或数字');
@@ -1639,7 +1647,8 @@ function setMode(m) {
     const code = $('myCode').value.trim();
     ensurePeerLib().then(() => {
       if (appMode !== 'p2p') return;
-      if (validCode(code)) goOnline();
+      if (!isLoggedIn()) setStatus('请先登录后再点“上线”');
+      else if (validCode(code)) goOnline();
       else setStatus('请先填写我的号码，再点“上线”');
     });
   }
@@ -1672,6 +1681,12 @@ function getAuthSession() {
 
 function setAuthSession(acct) {
   store.set(AUTH_SESSION_KEY, acct || '');
+}
+
+function isLoggedIn() {
+  const cur = getAuthSession();
+  const users = loadAuthUsers();
+  return !!(cur && users[cur]);
 }
 
 function syncCurrentUserCode(code) {
@@ -1785,8 +1800,15 @@ async function submitAuthForm() {
 
 function logoutAuthAccount() {
   setAuthSession('');
+  if (peer) {
+    try { peer.destroy(); } catch (e) {}
+    peer = null;
+  }
+  chatConns = {};
+  online = false;
   renderAuthBar();
-  setStatus('已退出登录（本机号码仍可继续使用）');
+  render();
+  setStatus('已退出登录并下线，请登录后再上线');
 }
 
 $('btnOpenAuth').onclick = () => openAuthModal('login');
@@ -1902,9 +1924,13 @@ function loadScript(src) {
     ensurePeerLib(); // SIP 模式下后台预加载，切回号码模式时直接可用
   }
   await loadTurnCredentials();
-  if (firstRun) setStatus('这是为你生成的固定号码，也可以改成好记的；点“上线”后把号码告诉对方');
-  else if (appMode === 'p2p') goOnline();
-  else setStatus('SIP 模式：填好服务器信息后点“注册”');
+  if (appMode === 'p2p') {
+    if (!isLoggedIn()) setStatus('未登录：请先点击“登录 / 注册”后再上线');
+    else if (firstRun) setStatus('这是为你生成的固定号码，也可以改成好记的；点“上线”后把号码告诉对方');
+    else goOnline();
+  } else {
+    setStatus('SIP 模式：填好服务器信息后点“注册”');
+  }
 })();
 </script>
 </body>
