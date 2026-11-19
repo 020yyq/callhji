@@ -31,6 +31,20 @@
   #incoming { background: #1f2a44; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
   #inText { font-size: 20px; text-align: center; }
 
+  /* 未接来电与未接信息提醒面板 */
+  #missedSec { background: #241b1b; border: 1px solid #522828; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  #missedHeader { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; color: #ffb3ad; }
+  #missedActions { display: flex; gap: 6px; }
+  .mini-btn { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; border-radius: 6px; background: #3a2727; color: #ffd6d3; }
+  #missedList { max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .missed-item { background: #161212; border-radius: 8px; padding: 8px 10px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; }
+  .missed-item:hover { background: #211919; }
+  .missed-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .missed-title { color: #fff; font-weight: 500; word-break: break-all; }
+  .missed-time { color: #9c8e8e; font-size: 11px; }
+  .missed-tag { flex: 0 0 auto; font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #ff453a; color: #fff; }
+  .missed-tag.msg { background: #0a84ff; }
+
   /* 聊天与图片区域样式 */
   #chatSec { background: #18181a; border: 1px solid #2c2c2e; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
   #chatHeader { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #aaa; }
@@ -80,6 +94,17 @@
       </div>
     </div>
 
+    <!-- 未接来电与未接信息记录 -->
+    <div id="missedSec" hidden>
+      <div id="missedHeader">
+        <span id="missedSummary">未接提醒（0）</span>
+        <div id="missedActions">
+          <button id="btnMarkRead" class="mini-btn" type="button">已读清空</button>
+        </div>
+      </div>
+      <div id="missedList"></div>
+    </div>
+
     <div id="incoming" hidden>
       <div id="inText"></div>
       <div class="row">
@@ -120,9 +145,10 @@
 // ===== 配置 =====
 const METERED_APP = 'yangyyg'; // 对应 yangyyg.metered.live
 const METERED_TURN_API_KEY = 'i5wjPHxYv2B5xctgnJsQJnDHlLfvl_w2_l9eEMIjtseV7YPk';
-const MAX_IMG_RAW_BYTES = 15 * 1024 * 1024; // 限制单张原始图片最大 15MB
-const MAX_IMG_SIDE = 800;                    // 压缩后最长边不超过 800px，降低 DataChannel 传输失败概率
-const IMG_JPEG_QUALITY = 0.62;               // 压缩质量
+const MAX_IMG_RAW_BYTES = 15 * 1024 * 1024;
+const MAX_IMG_SIDE = 800;
+const IMG_JPEG_QUALITY = 0.62;
+const MAX_MISSED_ITEMS = 50;
 
 const RTC_CONFIG = {
   iceServers: [
@@ -172,6 +198,7 @@ const RING_MS = Number(q.get('ring')) || 40000;
 const $ = (id) => document.getElementById(id);
 let peer = null, online = false, call = null, incoming = null, ctrlConn = null;
 let chatConns = {};
+let missedItems = []; // 未接来电与未接信息列表
 let localStream = null, wakeLock = null, ringTimer = null, inTimer = null;
 let durationTimer = null, callStartTime = 0;
 let PeerCtor = null;
@@ -209,6 +236,104 @@ function stopDurationTimer() {
   }
 }
 
+// ===== 未接来电与未接信息逻辑 =====
+function loadMissedFromStore() {
+  const raw = store.get('missedItems');
+  if (!raw) { missedItems = []; return; }
+  try {
+    const parsed = JSON.parse(raw);
+    missedItems = Array.isArray(parsed) ? parsed.slice(0, MAX_MISSED_ITEMS) : [];
+  } catch (e) {
+    missedItems = [];
+  }
+}
+
+function saveMissedToStore() {
+  store.set('missedItems', JSON.stringify(missedItems.slice(0, MAX_MISSED_ITEMS)));
+}
+
+function isUserAwayOrBusy() {
+  return document.hidden || !!call || !!incoming;
+}
+
+function recordMissedItem(kind, fromCode, detail, reason) {
+  if (!fromCode) return;
+  const entry = {
+    id: String(Date.now()) + '-' + Math.random().toString(36).slice(2, 7),
+    kind, // 'call' | 'msg'
+    fromCode,
+    detail: detail || '',
+    reason: reason || '',
+    time: nowTimeStr(),
+  };
+  missedItems.unshift(entry);
+  if (missedItems.length > MAX_MISSED_ITEMS) {
+    missedItems = missedItems.slice(0, MAX_MISSED_ITEMS);
+  }
+  saveMissedToStore();
+  renderMissed();
+}
+
+function clearMissedItems() {
+  missedItems = [];
+  saveMissedToStore();
+  renderMissed();
+}
+
+function renderMissed() {
+  const count = missedItems.length;
+  const callCount = missedItems.filter(x => x.kind === 'call').length;
+  const msgCount = missedItems.filter(x => x.kind === 'msg').length;
+  $('missedSec').hidden = count === 0;
+  if (count === 0) return;
+
+  const parts = [];
+  if (callCount > 0) parts.push(`未接来电 ${callCount}`);
+  if (msgCount > 0) parts.push(`未接信息 ${msgCount}`);
+  $('missedSummary').textContent = `${parts.join(' · ')}（共 ${count} 条，点击号码可填入）`;
+
+  const list = $('missedList');
+  list.innerHTML = '';
+  for (const item of missedItems) {
+    const row = document.createElement('div');
+    row.className = 'missed-item';
+
+    const main = document.createElement('div');
+    main.className = 'missed-main';
+
+    const title = document.createElement('div');
+    title.className = 'missed-title';
+    title.textContent = item.kind === 'call'
+      ? `号码 ${item.fromCode}（${item.detail || '语音'} · ${item.reason || '未接听'}）`
+      : `来自 ${item.fromCode}：${item.detail}`;
+
+    const time = document.createElement('div');
+    time.className = 'missed-time';
+    time.textContent = `${item.time} · 点击回拨/回复`;
+
+    main.appendChild(title);
+    main.appendChild(time);
+
+    const tag = document.createElement('span');
+    tag.className = 'missed-tag' + (item.kind === 'msg' ? ' msg' : '');
+    tag.textContent = item.kind === 'call' ? '未接来电' : '未接信息';
+
+    row.appendChild(main);
+    row.appendChild(tag);
+
+    row.onclick = () => {
+      $('peerCode').value = item.fromCode;
+      store.set('peerCode', item.fromCode);
+      if (item.kind === 'msg') {
+        $('chatInput').focus();
+      }
+      setStatus(`已填入号码 ${item.fromCode}`);
+    };
+
+    list.appendChild(row);
+  }
+}
+
 function render() {
   $('badge').textContent = online ? '● 在线' : '○ 离线';
   $('badge').className = online ? 'on' : '';
@@ -217,6 +342,7 @@ function render() {
   $('incoming').hidden = !incoming;
   $('ctrl').hidden = !call;
   $('chatSec').hidden = !online;
+  renderMissed();
 }
 
 function clearCallTimers() {
@@ -340,6 +466,23 @@ function compressImageFile(file) {
   });
 }
 
+function handleIncomingChatOrImage(fromCode, uiPayload, summaryText) {
+  if (!call && !incoming && !$('peerCode').value.trim()) {
+    $('peerCode').value = fromCode;
+    store.set('peerCode', fromCode);
+  }
+  appendChatMessage(fromCode, uiPayload, false);
+
+  if (isUserAwayOrBusy()) {
+    const reason = document.hidden ? '后台时收到' : (call ? '通话中收到' : '来电时未及时查看');
+    recordMissedItem('msg', fromCode, summaryText, reason);
+  }
+
+  if (!call && !incoming) {
+    setStatus(`收到来自 ${fromCode} 的新消息`);
+  }
+}
+
 function bindDataConnection(conn) {
   if (!conn || !conn.peer) return;
   chatConns[conn.peer] = conn;
@@ -348,35 +491,28 @@ function bindDataConnection(conn) {
     if (!data || typeof data !== 'object') return;
     if (data.type === 'chat' && typeof data.text === 'string') {
       const fromCode = String(conn.peer).replace(PREFIX, '');
-      if (!call && !incoming && !$('peerCode').value.trim()) {
-        $('peerCode').value = fromCode;
-        store.set('peerCode', fromCode);
-      }
-      appendChatMessage(fromCode, { kind: 'text', text: data.text }, false);
-      if (!call && !incoming) {
-        setStatus(`收到来自 ${fromCode} 的新消息`);
-      }
+      handleIncomingChatOrImage(fromCode, { kind: 'text', text: data.text }, data.text);
     } else if (data.type === 'image' && typeof data.dataUrl === 'string' && data.dataUrl.startsWith('data:image/')) {
       const fromCode = String(conn.peer).replace(PREFIX, '');
-      if (!call && !incoming && !$('peerCode').value.trim()) {
-        $('peerCode').value = fromCode;
-        store.set('peerCode', fromCode);
-      }
-      appendChatMessage(fromCode, { kind: 'image', dataUrl: data.dataUrl, name: data.name || '图片' }, false);
-      if (!call && !incoming) {
-        setStatus(`收到来自 ${fromCode} 的图片`);
-      }
+      handleIncomingChatOrImage(
+        fromCode,
+        { kind: 'image', dataUrl: data.dataUrl, name: data.name || '图片' },
+        `[图片] ${data.name || '图片'}`
+      );
     } else if (data.type === 'reject' && call && call.peer === conn.peer) {
       cleanupCall('对方已拒绝来电');
     } else if (data.type === 'busy' && call && call.peer === conn.peer) {
       cleanupCall('对方正在通话中');
     } else if (data.type === 'cancel' && incoming && incoming.peer === conn.peer) {
+      const missedFrom = String(incoming.peer).replace(PREFIX, '');
+      const missedMode = (incoming.metadata && incoming.metadata.video) ? '视频' : '语音';
       clearCallTimers();
       const inc = incoming;
       incoming = null;
       try { inc.close(); } catch (e) {}
+      recordMissedItem('call', missedFrom, missedMode, '对方已取消');
       render();
-      setStatus('对方已取消呼叫');
+      setStatus('对方已取消呼叫（已记录未接来电）');
     }
   });
 
@@ -642,14 +778,19 @@ async function dial(video) {
 }
 
 function onIncoming(c) {
-  if (call || incoming) {
-    sendSignal(c.peer, { type: 'busy' });
-    try { c.close(); } catch (e) {}
-    return;
-  }
-  incoming = c;
   const from = String(c.peer).replace(PREFIX, '');
   const video = !!(c.metadata && c.metadata.video);
+  const modeLabel = video ? '视频' : '语音';
+
+  if (call || incoming) {
+    sendSignal(c.peer, { type: 'busy' });
+    recordMissedItem('call', from, modeLabel, '忙线中');
+    try { c.close(); } catch (e) {}
+    renderMissed();
+    return;
+  }
+
+  incoming = c;
   $('inText').textContent = '来电：' + from + (video ? '（视频）' : '（语音）');
   setStatus('有来电');
   render();
@@ -661,8 +802,9 @@ function onIncoming(c) {
       if (pc.connectionState === 'closed' || pc.connectionState === 'failed' || pc.iceConnectionState === 'failed') {
         clearCallTimers();
         incoming = null;
+        recordMissedItem('call', from, modeLabel, '对方已取消');
         render();
-        setStatus('对方已取消呼叫');
+        setStatus('对方已取消呼叫（已记录未接来电）');
       }
     };
     pc.addEventListener('connectionstatechange', onInPcChange);
@@ -674,8 +816,9 @@ function onIncoming(c) {
     if (incoming === c) {
       incoming = null;
       try { c.close(); } catch (e) {}
+      recordMissedItem('call', from, modeLabel, '超时未接听');
       render();
-      setStatus('来电已过期');
+      setStatus('来电已过期（已记录未接来电）');
     }
   }, RING_MS);
 }
@@ -699,8 +842,11 @@ function reject() {
   const c = incoming;
   incoming = null;
   if (c) {
+    const from = String(c.peer).replace(PREFIX, '');
+    const modeLabel = (c.metadata && c.metadata.video) ? '视频' : '语音';
     sendSignal(c.peer, { type: 'reject' });
     try { c.close(); } catch (e) {}
+    recordMissedItem('call', from, modeLabel, '已拒绝');
   }
   stopMedia(); render();
   setStatus('已拒绝来电');
@@ -721,6 +867,7 @@ $('btnVideo').onclick = () => dial(true);
 $('btnAccept').onclick = accept;
 $('btnReject').onclick = reject;
 $('btnHang').onclick = () => hangup();
+$('btnMarkRead').onclick = clearMissedItems;
 $('btnSend').onclick = sendChatMessage;
 $('btnImg').onclick = () => { $('imgPicker').value = ''; $('imgPicker').click(); };
 $('imgPicker').onchange = (e) => {
@@ -762,6 +909,7 @@ function loadScript(src) {
   });
 }
 (async function boot() {
+  loadMissedFromStore();
   const firstRun = !store.get('myCode');
   if (firstRun) store.set('myCode', String(Math.floor(100000 + Math.random() * 900000)));
   $('myCode').value = store.get('myCode');
