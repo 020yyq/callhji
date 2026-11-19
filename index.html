@@ -310,8 +310,7 @@ async function pullOfflineMailbox(myCode) {
     const resp = await fetch(url);
     if (!resp.ok) return 0;
     const text = await resp.text();
-    const lines = text.trim().split('
-').filter(Boolean);
+    const lines = text.trim().split('\n').filter(Boolean);
     let importedCount = 0;
 
     for (const line of lines) {
